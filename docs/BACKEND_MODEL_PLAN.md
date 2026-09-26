@@ -1,0 +1,174 @@
+# RentFlow backend: implement the full financial domain model (Phase 2)
+
+> **For any AI session / developer picking this up:** this file is the source of truth for backend work. Read it fully, resume at the first unchecked milestone in the Progress checklist, and tick the box (with a short note of what was done and verified) as each milestone lands. Do not skip milestones or re-do checked ones. Never edit an already-applied migration (`0001`–`0003` and anything committed later); add new ones. Frontend work is tracked separately in `frontend/docs/FRONTEND_REFACTOR_PLAN.md` (Phase 1, complete).
+
+## Progress (update as each milestone lands)
+
+Baseline at plan time (2026-09-26): Django 5.2 + Django Ninja, Python 3.11.9 in `backend/venv` (README says 3.12+; either works), 3 migrations, **5 tests passing** (`USE_SQLITE=1 DJANGO_DEBUG=1 venv/Scripts/python.exe manage.py test rentals`), `manage.py check` clean. Backend repo has a single `first commit`; nothing here is committed yet.
+
+- [ ] M0 — Baseline, structure and Postgres test path (no behaviour change)
+- [ ] M1 — Identities, actors, branches and permissions
+- [ ] M2 — Vehicle ownership, driver assignments, effective-dated agreement versions
+- [ ] M3 — Expense rules, approvals and the expense state machine
+- [ ] M4 — Chart of accounts, charges, invoices, opening balances, ledger reconciliation
+- [ ] M5 — Payments: accounts, reversals, unapplied credit, direct payments
+- [ ] M6 — Settlement engine (preview, readiness, approval, close, reopen, adjustments)
+- [ ] M7 — Notification delivery (enqueue, templates, consent, channels, inbox)
+- [ ] M8 — Documents, audit events, maintenance cases
+- [ ] M9 — Reports and exports
+- [ ] M10 — Actor portal API (owner / driver / customer scoped)
+- [ ] M11 — Optional operations extension (only if the client confirms the need)
+
+## Context: what exists today (read from the code, not assumed)
+
+`backend/rentals/` (single app; one-liner-dense style) — `models.py`, `services.py` (atomic money operations), `api.py` (Ninja, session auth), `tasks.py` (Celery outbox stub), `tests.py`, `admin.py`, `management/commands/seed_demo.py`.
+
+Models: `Organization`, `Membership` (roles admin/accountant/operations/viewer), `Party` (owner/driver/customer), `Vehicle` (single `owner` FK), `Agreement` (terms **inline**: customer_rent, owner_rent, driver_salary, fuel_responsible, repair_responsible, owner_offset_allowed), `Period` (agreement+month, `closed_at`), `Obligation` (exactly 3 kinds per period: customer_rent / owner_rent / driver_salary), `Expense` (state pending/posted/reversed, JSON `rule_snapshot`, `paid_by`/`responsible` strings), `Payment` + `Allocation`, `OwnerOffset`, `JournalEntry`/`JournalLine` (account is a free string), `NotificationOutbox`, `IdempotencyRecord`.
+
+What already works and **must keep working**: idempotent `record_expense` / `record_payment`, atomic balanced journal, `select_for_update` on periods/obligations, owner offset only when the agreement allows it, expenses ≥ ৳5,000 need approval, reversal by linked journal, close-period gate on pending approvals, cross-organization 404, CSRF-protected session API, decimal-string money.
+
+### Gaps found by reading the code (each is owned by a milestone below)
+
+1. **Identity** — no link from `Party` to a login user, no branch, no object-scoped access; `Membership` roles don't include owner/driver/customer/mechanic. (M1, M10)
+2. **Terms are not effective-dated** — rent/salary/rules live on `Agreement`; `Expense.rule_snapshot` is a 3-key JSON copy. No `AgreementVersion`, no revision history. (M2, M3)
+3. **Vehicle has one owner forever; agreement has one driver forever** — no `VehicleOwnership` / `DriverAssignment` history; only `create_agreement` checks vehicle overlap (`agreements/quick` does not). (M2)
+4. **Expense engine is a stub** — only `fuel`/`repair` have rules; categories hard-coded in the service; `paid_by` limited to operator/owner; approval threshold `5000` hard-coded in `record_expense`; no `Approval` model, no proof-required, no override with permission+reason, no duplicate warning (unique only per period+reference), no draft state. (M3)
+5. **Ledger is partly a string convention** — `JournalLine.account` is free text, lines carry no party/agreement/period dimension, and `statement()` is computed from obligations/allocations/expenses, **not** from the journal (two sources of truth, no reconciliation test). Only 3 obligation kinds: no variable charges, credits, adjustments, opening balances, carry-forward, invoices. `salary_advance` is allocated to the driver-salary obligation exactly like a payout, so statements can't show advances separately. (M4)
+6. **Payments** — no reversal (`reverse_payment` doesn't exist), no unapplied credit, no payer/recipient/payment account (`method` is a free string), no direct owner→driver / customer→driver payments, no closed-period policy. (M5)
+7. **Settlement is one timestamp** — `Period.closed_at`; no `Settlement`/`SettlementLine`, no readiness checks, approval, reopen, late-entry adjustment. `close_period` refuses negative balances instead of expressing "owner owes operator". (M6)
+8. **Notifications never send** — `NotificationOutbox` rows are created, but **nothing enqueues `deliver_notice`** (no `.delay()`/`on_commit`); no templates, consent/preferences, delivery-attempt records, channel adapters, in-app inbox/read state; `/notifications/{id}/retry` only flips state back to `queued`. Only expense-posted-to-owner, payment, rent-issued and settlement-closed events exist. (M7)
+9. **No documents, no audit trail, no maintenance** — receipts aren't stored (the frontend keeps only a file name); no `AuditEvent`, `Document`, `MaintenanceCase`. (M8)
+10. **No reports/exports**; list endpoints are capped slices (`[:200]`), only `agreements` paginates. (M9)
+11. **Snapshot serializes money as floats** (`float(a.customer_rent)` in `/snapshot`) while other endpoints use decimal strings; the frontend depends on the snapshot shape (see contract below). (M9, with a frontend change)
+12. **Concurrency is untested on PostgreSQL** — tests run on SQLite, which ignores `select_for_update`; README already admits it. (M0)
+
+## Frontend contract (do not break silently)
+
+The Next.js app (API mode, `NEXT_PUBLIC_RENTFLOW_API_MODE=1`) calls, through a same-origin `/backend/*` rewrite with session cookie + `X-CSRFToken`: `GET /me`, `GET /csrf`, `GET /orgs/{org}/snapshot?month=2026-09-01`, `POST /orgs/{org}/agreements/quick`, `POST /orgs/{org}/agreements/{id}/periods?month=…`, `POST /orgs/{org}/expenses`, `POST /orgs/{org}/payments` (both with `Idempotency-Key`), `POST /orgs/{org}/expenses/{id}/approve|reverse`, `POST /orgs/{org}/periods/{id}/close`, `POST /orgs/{org}/notifications/{id}/retry`. `snapshot` returns `{agreements[], entries[], notices[], closed[], backend:{orgId, periodIds, obligationIds, expenseIds}}` with ids like `AGR-{pk}`, `EXP-{pk}`, `PAY-{payment}-{alloc}`, `NT-{pk}`. Snapshot numbers are `float`; `obligationIds` keys are `customer|owner|driver`. Payload fields: expense `{period_id, category, amount, event_date, paid_by, responsible, offset_owner, reference, description}`; payment `{kind, amount, reference, method, event_date, allocations:[{obligation_id, amount}]}`.
+
+**Rule:** every milestone either keeps these endpoints and shapes byte-compatible (add fields, don't rename/remove), or changes them **together with** `frontend/lib/api.ts`, `frontend/lib/store-context.tsx` and `frontend/lib/demo.ts` in the same session, then re-runs `cd frontend && npm run typecheck && npm run build`. The frontend's API mode was **not re-verified after the Phase 1 refactor** — do a manual pass (below) before M2.
+
+## Cross-cutting rules (apply to every milestone)
+
+- **Money:** `DecimalField(14,2)` / `NUMERIC`, never float; `services.bd()` validation; define and test rounding (ROUND_HALF_UP to 0.01) wherever a division/proration appears.
+- **Domain services, not CRUD:** money-changing actions are functions in `services` (`post_expense`, `issue_invoice`, `receive_payment`, `pay_owner`, `pay_driver`, `reverse_entry`, `preview_settlement`, `close_settlement`, …). Don't expose editable public CRUD for ledger tables. Authorization lives in one place (`policies`), called from each endpoint; querysets are always filtered by organization and, for actors, by party scope.
+- **Atomic + idempotent + locked:** multi-row postings in `transaction.atomic`; `Idempotency-Key` on posting/payments/settlement generation; `select_for_update` on rows that concurrent allocation/closing could contend on (lock in a fixed order: period → obligations by pk).
+- **Immutable postings:** posted financial rows are never edited or deleted. Corrections = linked reversal + replacement, capturing who/when/why. Balances are derived or projected from postings — no authoritative editable `due` field.
+- **Effective dating:** terms/rules are versioned; historical entries keep the version they were posted under.
+- **Outbox in the same transaction** as the posting; send after commit.
+- **Migrations:** additive first, data-migrate, then (a later milestone) remove old columns. Every data migration is reversible or documented as not. `python manage.py makemigrations --check` must be clean before you finish.
+- **Tests test behaviour, not code** (spec §"ACCOUNTING AND DATA INVARIANTS"): payer vs liable party, authorized offset, partial allocation, advance, immutable reversal, historical rules, concurrent posting/close, close retry, permission boundaries, outbox retry/dedupe, statement totals vs ledger. Split `tests.py` into `rentals/tests/` (done in M0).
+- **Worked-example invariants (never regress):** Sept 2026 sample — customer rent ৳100,000 / paid ৳70,000 → customer due ৳30,000; owner gross ৳60,000, authorized repair offset ৳8,000, paid ৳40,000 → owner due ৳12,000; driver salary ৳20,000, paid ৳15,000 → driver due ৳5,000; operator accrual margin ৳20,000; recorded cash movement ৳7,000. `seed_demo` must keep producing exactly this.
+
+## Definition of done for every milestone
+
+1. `USE_SQLITE=1 DJANGO_DEBUG=1 venv/Scripts/python.exe manage.py test rentals` green **and** the same on PostgreSQL (`docker compose up -d`, env from `.env.example`) once M0 is done.
+2. `manage.py check` and `makemigrations --check` clean; migrations applied on a fresh Postgres DB and on a DB that already has the previous milestone's data (data migrations exercised).
+3. `seed_demo --username X` still yields the worked-example invariants; extend it for new concepts without changing those numbers.
+4. If any frontend-visible payload changed: frontend updated, `npm run typecheck && npm run build` green, and the API-mode manual pass done.
+5. This file updated: box ticked with what was done, deviations, and anything left for a later milestone.
+
+## Business decisions still open (spec §1 — never hard-code; ask the user/client, meanwhile use these defaults and make them configurable per agreement/org)
+
+| Question | Default to build | Needed by |
+|---|---|---|
+| Who formally employs/pays the driver? | Operator pays salary; support owner/customer direct payment recorded against the right obligation | M5 |
+| Can advances net against owner rent? | No — advance reduces **driver** due only; never nets against owner rent unless an agreement flag says so | M4 |
+| Does owner rent change with downtime? | No automatic change; explicit adjustment charge with approval | M4 |
+| One driver on several vehicles? | Allowed via `DriverAssignment`; warn on overlap, don't block | M2 |
+| Mid-month agreement change? | New version applies from the first period starting on/after `effective_from`; current month only via an explicit approved adjustment | M2 |
+| Tax/VAT and invoicing treatment | Out of scope for MVP: no tax lines; document as requiring accountant review before production | M4 |
+| Owners/drivers log in, or messages only? | Messages first (M7); portal later (M10) | M7/M10 |
+| Settlement cutoff and approval authority | Calendar month-end; approval by `admin` role; configurable in org settings | M6 |
+| Negative owner net ("owner owes operator") | Allowed and labelled; close is not blocked by it | M6 |
+| SMS/WhatsApp/email provider (Bangladesh) and credentials | Console/dummy adapter that never reports "delivered"; **ask the user for the provider and keep secrets server-side in env** | M7 |
+| Private object storage for receipts | Local `MEDIA_ROOT` with signed-URL abstraction in dev; S3-compatible in prod — **ask the user** | M8 |
+
+## Milestones
+
+### M0 — Baseline, structure and Postgres test path
+No behaviour change. Goal: make later work safe and reviewable.
+- Turn `rentals/models.py`, `services.py`, `api.py`, `tests.py` into packages (`models/`, `services/`, `api/`, `tests/`) that **re-export the same names from `__init__.py`** so existing imports and migrations keep resolving (`app_label` stays `rentals`). Add `rentals/policies.py` (empty role→action map stub).
+- Add a documented Postgres test run (`docker compose up -d` → `POSTGRES_*` env → `manage.py test rentals`) and, if cheap, a `TransactionTestCase` that proves two concurrent `record_payment` calls cannot over-allocate one obligation (skipped on SQLite).
+- Add the missing baseline tests: statement vs journal reconciliation for the worked example (currently unasserted), reversal restores balances, owner-offset removed from statement on reversal, `agreements/quick` overlap gap (write it as an expected-failure/xfail documenting gap #3).
+- Fix `backend/README.md` (Python version, test commands) and add `backend/CLAUDE.md`.
+- Done when: 5 old + new tests green on SQLite and Postgres, `makemigrations --check` clean, no new migration.
+
+### M1 — Identities, actors, branches and permissions
+- Models: `Branch` (org, name); `Membership` gains `branch` (nullable) and role choices `admin, accountant, operations, viewer` + `owner`, `driver`, `customer`, `mechanic` (or a separate `ActorAccess`); `PartyUser` (party ↔ user, org, active) so a login can be an owner/driver/customer; `Party` gains `preferred_channel`, `consent_sms/whatsapp/email` (+ timestamp/source), `is_billing_contact` handling via `Contact` (party, name, phone, email, role) for corporate customers.
+- `policies.py`: one table `(role, action) → allowed` covering read, draft, approve, post, reverse, settle, reopen, export, sensitive-data access (spec Screen L) + `scope_queryset(user, org, model)` that restricts actors to their own parties/vehicles/agreements. Replace ad-hoc `membership(..., write=(…))` tuples in `api.py` with policy checks (keep same allowed roles for the existing endpoints so behaviour is unchanged).
+- API: `/me` returns roles + linked parties + branch; party/contact CRUD via services (org + role scoped).
+- Tests: permission matrix per role×action; cross-org 404; an owner login sees only their vehicles/agreements; a driver never sees customer rent or owner terms.
+- Data migration: none required (new tables); default `Branch` per org.
+
+### M2 — Vehicle ownership, driver assignments, effective-dated agreement versions
+- Models: `VehicleOwnership` (vehicle, owner Party, effective_from, effective_to nullable, exclusion so one owner per vehicle per date); `DriverAssignment` (agreement or vehicle, driver Party, effective_from/to, salary_override nullable); `AgreementVersion` (agreement, version no., effective_from, customer_rent, owner_rent, driver_salary, billing_cadence, payout_cadence, owner_offset_allowed, approval_threshold, created_by, reason, status `draft|active|superseded`); `Agreement` gains `status` (`draft|active|ended`), keeps identity/relations, and **stops being the source of truth for terms**.
+- Data migration: for each existing `Agreement` create `AgreementVersion` v1 (effective_from=start_date), one `VehicleOwnership` from `Vehicle.owner`, one `DriverAssignment` from `Agreement.driver`. Keep the old columns as read-through (properties returning the version effective *today*) for one milestone so the frontend `snapshot` and `agreement_dict` keep their shapes; drop columns in a later migration only after M3/M4 stop reading them.
+- Services: `create_agreement_draft`, `activate_agreement`, `revise_agreement(effective_from, changes, reason)` (rejects retroactive change into a closed period), `assign_driver`, `transfer_vehicle_ownership`; **all** agreement creation paths (including `agreements/quick`) run the same overlap validation; overlaps warn (return warnings list) rather than always block, except same-vehicle same-customer active overlap which blocks.
+- `issue_period` reads the version effective for the month (or splits per the open mid-month decision) and records `agreement_version` on `Period`/`Obligation` so history is reproducible.
+- API: agreement detail with versions + assignment history; revise/assign endpoints. `/snapshot` unchanged in shape.
+- Tests: historical statement unchanged after a revision; revision applies from next period; ownership change mid-history; overlap rules; data migration on a DB seeded by `seed_demo`.
+
+### M3 — Expense rules, approvals and the expense state machine
+- Models: `ExpenseCategory` (org-configurable; seed the 8 from the spec: fuel/gas, toll/parking, routine maintenance, repairs, damage, cleaning, driver allowance, misc); `ExpenseRule` (agreement_version, category, responsible, first_payer, reimbursable, deductible_from `owner_payable|none`, approval_threshold, proof_required, notify_parties); `Approval` (subject type/id, requested_by, decided_by, decision, reason, threshold_at_time, decided_at); `Expense` gains category FK, rule FK + version (replace the 3-key JSON `rule_snapshot` with a real snapshot of the applied rule), `override_reason`/`overridden_by`, `reverses` self-FK, `state` extended: `draft → pending_approval → posted → reversed`.
+- Services: `submit_expense` (draft save with validation; edits allowed only in draft), `post_expense`, `approve_expense`, `reverse_expense` (linked reversal record, not a mutation), duplicate warning by (amount, event_date, reference) with an explicit `allow_duplicate_reason`, per-entry override requiring permission + reason, proof-required enforcement (uses M8 `Document` when it lands; until then a required `receipt_reference`), replace the hard-coded ৳5,000 with the rule/org threshold (default 5000 so behaviour is unchanged).
+- Widen `paid_by`/`responsible` to operator/owner/customer/driver; cross-party payment creates a reimbursement/recoverable `Charge` in M4 (until M4, keep rejecting unsupported combinations with the existing error messages).
+- Preserve wire compatibility: `POST /expenses` payload and `expense_dict` keep current fields; new fields optional.
+- Tests: rule resolved by effective version; override needs permission+reason; rule change doesn't rewrite history; threshold approval; duplicate warning; reversal is a linked record and journal nets to zero; the worked example unchanged.
+
+### M4 — Chart of accounts, charges, invoices, opening balances, ledger reconciliation
+- Models: `Account` (org, code, name, type asset/liability/revenue/expense, subledger party kind) replacing string accounts (data-migrate the existing strings: CASH, CUSTOMER_RECEIVABLE, RENT_REVENUE, OWNER_RENT_EXPENSE, OWNER_PAYABLE, DRIVER_SALARY_EXPENSE, DRIVER_PAYABLE, OPERATING_EXPENSE, OWNER_RECOVERABLE, CUSTOMER_RECOVERABLE); `JournalLine` gains `account` FK + `party`, `agreement`, `period`, `vehicle` dimensions; `Charge` (variable charges/credits/adjustments/reimbursements against a party+period with source link); `Invoice` + `InvoiceLine` (number sequence per org, status `draft|issued|partially_paid|paid|overdue|void`, due date, links to obligations/charges); `Obligation.kind` widened (rent, charge, credit, adjustment, opening_balance, reimbursement, salary, advance) — **keep the three original kinds and the `unique_period_obligation` semantics for rent/owner_rent/driver_salary** (the frontend keys `obligationIds` by customer/owner/driver).
+- Services: `issue_invoice` (preview → issue, idempotent), `post_charge`, opening-balance import/carry-forward from prior period, advances modelled as their own obligation type so statements show **advance separately from salary paid** (fixes gap #5; keep `driver.paid` semantics in `statement()` output for the frontend and add `driver.advance` as a new field).
+- **Reconciliation:** implement `ledger_statement(period)` computed from journal lines and assert it equals `statement(period)` for every test fixture; then make `statement()` the thin projection of one source of truth (decide which, document it here). Add a management command `check_ledger` that verifies every entry balances and statements reconcile.
+- Tests: reconciliation on the worked example and on partial payments/reversals/advances/credits; opening-balance carry-forward; invoice status transitions derived, not stored-editable; negative-balance wording in `statement()` (`owner_owes_operator` flag).
+
+### M5 — Payments: accounts, reversals, unapplied credit, direct payments
+- Models: `PaymentAccount` (cash/bank/mobile wallet, org, name); `Payment` gains `payer` and `recipient` Party, `account` FK, `method` enum, `status` (`posted|reversed`), `reverses` self-FK, `unapplied_amount` derived (payment − allocations); `Allocation` gains `order`.
+- Services: `receive_payment`, `pay_owner`, `pay_driver` (thin, named wrappers over one `record_payment` core), `reverse_payment` (linked reversal + allocation reversal + journal reversal; permission + reason; blocked in closed periods → routed to M6 adjustment), unapplied credit allowed only where the org allows it and re-appliable via `allocate_credit`, direct payments (owner/customer pays driver) recorded against the correct obligation **without** an operator cash journal line, explicit allocation order across invoices, over-allocation prevention under lock.
+- API: keep `POST /payments` payload; add optional `payer_id`, `recipient_id`, `account_id`; `POST /payments/{id}/reverse`; `GET /payments/{id}`.
+- Tests (PostgreSQL required for the concurrency ones): two customer installments; overpayment rejected; concurrent allocation cannot exceed the open amount; reversal restores balances and journal nets to zero; direct payment leaves operator cash untouched; idempotent replay and key reuse with different body rejected.
+
+### M6 — Settlement engine
+- Models: `Settlement` (org, agreement, period month, state `draft|pending_approval|approved|closed|reopened`, prepared/approved/closed by+at, `reopen_reason`, unique (agreement, month)); `SettlementLine` (frozen statement rows with `source_type/source_id` for drill-down: customer/owner/driver/operator sections); `OrgSettings` (cutoff day, approval role, whether negative owner net blocks close).
+- Services: `preview_settlement` (readiness checks: missing agreement rule, unapproved expense, unmatched payment, pending invoice, prior-period opening balance — return structured exceptions), `request_settlement_approval`, `approve_settlement`, `close_settlement` (idempotent: retry cannot duplicate bills, payables or notifications — enforce with the unique constraint + idempotency key + outbox event keys), `reopen_settlement` (permission + reason + audit; only latest closed month or with cascade rules documented), **late-entry policy**: an expense/payment dated in a closed period is posted to the next open period as a linked adjustment (never silently into the closed one).
+- Keep `POST /periods/{id}/close` working as a thin wrapper that runs preview→approve→close for the frontend's single-button flow (documented as a shortcut); add `GET/POST /settlements/…` for the full flow.
+- Negative owner net: statement says "owner owes operator", close not blocked by default.
+- Tests: readiness exceptions; close retry idempotent (notification count stays 3, no duplicate obligations); concurrent close (PostgreSQL); reopen with reason; late entry becomes adjustment; worked example closes cleanly.
+
+### M7 — Notification delivery
+- **Fix the outbox first:** enqueue with `transaction.on_commit(lambda: deliver_notice.delay(id))` wherever `notice()` runs (today nothing enqueues); add a Celery beat sweeper for stuck `queued` rows.
+- Models: `NotificationTemplate` (event_type, channel, locale, body with safe placeholders), `NotificationPreference` (party, channel, enabled — consent from M1), `Delivery` (outbox FK, channel, provider, attempt no., state `queued|sending|sent|delivered|failed`, provider_message_id, error, timestamps), `read_at` for in-app inbox.
+- Channel adapter interface (`send(recipient, rendered) -> DeliveryResult`) with `in_app` (real), `console` (dev; **never reports "delivered"**), and stub adapters for SMS/WhatsApp/email — wire the real provider only after the user chooses one; credentials only via env, never in the DB/client.
+- Rules: recipients derive from the transaction's affected parties + consent, never a broadcast; render with a sanitizer that can't leak another party's salary/commercial terms (test it); dedupe by (event_key, recipient) already exists — keep; retry with backoff (max attempts configurable); permissioned resend with reason (audit in M8); reminders/overdue via beat.
+- More events: expense recorded/approved, reimbursement, invoice issued, payment received, owner/driver payout, adjustment/reversal, settlement issued, reminder. API: list with filters, inbox read/unread, resend, per-event recipient preview. Keep `/notifications` and `/notifications/{id}/retry` shapes; `/snapshot`'s `notices` mapping keeps working.
+- Tests: outbox retry and dedupe; failure recorded without marking delivered; consent respected; sanitizer; on_commit fires only after commit (rollback ⇒ no send).
+
+### M8 — Documents, audit events, maintenance cases
+- `Document` (org, owner-object link generic FK to Expense/Payment/Agreement/Vehicle/Party, storage key, content type, size, sha256, uploaded_by); private storage behind a signed-URL abstraction (dev: `MEDIA_ROOT` + short-lived signed view; prod: S3-compatible via env); upload validation (type/size allowlist, virus-scan hook point), removal only while the parent is draft; enforce M3 `proof_required` with real documents; `GET /documents/{id}/url` returns an authorized signed URL and logs the access.
+- `AuditEvent` (org, actor, at, action, target type/id, before/after JSON, reason, request id/ip): written by a single helper called from every service in M2–M7 (retrofit), plus a **sensitive-read log** for owner/driver/customer commercial terms; viewer endpoint with filters.
+- `MaintenanceCase` (vehicle, reported_by, issue, vendor, quote, downtime_from/to, status, approval, linked Expense(s)); a mechanic/worker role can create requests but cannot post accounting entries; payment responsibility still flows through the expense engine.
+- Tests: signed URL expiry and authorization; audit row per state change with before/after; mechanic cannot post; document required by rule blocks posting.
+
+### M9 — Reports and exports
+- Read-only report services (query-count-tested with `assertNumQueries`, paginated, filters: period, car, owner, driver, customer, branch): revenue, cost by responsible party and category, owner liability, payroll liability, customer aging, vehicle contribution, cash flow, missing receipts.
+- CSV export endpoint per report that preserves filters and adds `generated_at` + applied-filter rows (match the frontend's current CSV column sets in `frontend/lib/reports.ts`: it exports `Agreement, Vehicle, <Party>, <columns> BDT, Generated at` and entries `ID, Agreement, Date, Type, Amount BDT, Paid by, Responsible, Status, Reference`).
+- Make list endpoints consistently paginated (`count`, `items`, `next`); drop the `[:200]` slices. Decide (with the frontend) whether `/snapshot` moves to decimal strings; if so change `frontend/lib/api.ts` + `demo.ts` types in the same session.
+- Tests: totals reconcile to the ledger (M4 check); no N+1; permissions on export (export action in `policies`).
+
+### M10 — Actor portal API
+- Endpoints under `/portal/…`, session-auth for linked actors (M1 `PartyUser`), every queryset scoped to the actor's own parties: home summary, my vehicles/agreement/assignment, statement (own side only), activity, documents, messages/inbox (M7), profile/notification preferences. Owner sees owner terms, deductions with proof and reasons; driver sees salary/advance/paid/due, **never** customer rent; customer sees own invoices/payments/due, filterable by department/car.
+- Decide actor login method with the user (password reset / magic link / OTP) before building; do not ship a portal without server-verified identity.
+- Tests: an actor cannot read another party's records by id-guessing (404, not 403); field-level exclusions; a user with several roles gets the union only of their own parties.
+
+### M11 — Optional operations extension
+Only if the client confirms short-term rentals or workshop/field staff: reservations, availability, dispatch, inspections, damage, tasks. Any damage/maintenance charge must feed the M3 expense/responsibility engine. Do not require pickup/return flows for continuing monthly agreements.
+
+## Manual API-mode pass (do this once, before M2, and after any contract change)
+
+1. `docker compose up -d`; `cd backend`; venv; `pip install -r requirements.txt`; `copy .env.example .env` and load the variables; `python manage.py migrate`; `createsuperuser`; `python manage.py seed_demo --username <user>`; `python manage.py runserver 127.0.0.1:8000`.
+2. `cd frontend && copy .env.example .env.local` with `NEXT_PUBLIC_RENTFLOW_API_MODE=1`; `npm run dev`; sign in at `http://localhost:8000/admin/` first (use `localhost`, not `127.0.0.1`), then open `http://localhost:3000`.
+3. Confirm: loading state then dashboard shows customer due ৳30,000 / owner ৳12,000 / driver ৳5,000; stop Django → error state renders; record one of each entry type (≥ ৳5,000 expense lands Pending), approve, reverse (prompts for a reason), retry a failed notice, create an agreement via the wizard, close a period; each POST carries `Idempotency-Key` and hits the same endpoints as before.
+
+## Suggested session workflow
+
+Pick the first unchecked milestone → read the relevant models/services (they are dense one-liners; read whole functions) → write failing domain tests first → implement services → then API → migrate → run the definition of done → update this file. Prefer several small commits per milestone if the user asks for commits (none have been made yet; do not commit unless asked).
