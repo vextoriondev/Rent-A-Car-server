@@ -1,7 +1,19 @@
 """Environment-first settings. SQLite is only a local/test fallback."""
 import os
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 BASE_DIR = Path(__file__).resolve().parent.parent
+def _load_env_file(path):
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+for _env_file in ('.env', '.env.local'):
+    _load_env_file(BASE_DIR / _env_file)
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'development-only-change-me')
 DEBUG = os.environ.get('DJANGO_DEBUG', '0') == '1'
 if not DEBUG and SECRET_KEY == 'development-only-change-me':
@@ -16,6 +28,9 @@ WSGI_APPLICATION = 'config.wsgi.application'
 ASGI_APPLICATION = 'config.asgi.application'
 if os.environ.get('USE_SQLITE') == '1':
     DATABASES = {'default':{'ENGINE':'django.db.backends.sqlite3','NAME':BASE_DIR/'db.sqlite3'}}
+elif os.environ.get('DATABASE_URL'):
+    _u = urlparse(os.environ['DATABASE_URL'])
+    DATABASES = {'default':{'ENGINE':'django.db.backends.postgresql','NAME':_u.path.lstrip('/'),'USER':_u.username,'PASSWORD':_u.password,'HOST':_u.hostname,'PORT':_u.port or 5432,'CONN_MAX_AGE':60,'OPTIONS':{k:v[0] for k,v in parse_qs(_u.query).items()}}}
 else:
     DATABASES = {'default':{'ENGINE':'django.db.backends.postgresql','NAME':os.environ.get('POSTGRES_DB','rentflow'),'USER':os.environ.get('POSTGRES_USER','rentflow'),'PASSWORD':os.environ.get('POSTGRES_PASSWORD',''),'HOST':os.environ.get('POSTGRES_HOST','localhost'),'PORT':os.environ.get('POSTGRES_PORT','5432'),'CONN_MAX_AGE':60}}
 AUTH_PASSWORD_VALIDATORS = [{'NAME':'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},{'NAME':'django.contrib.auth.password_validation.MinimumLengthValidator'},{'NAME':'django.contrib.auth.password_validation.CommonPasswordValidator'},{'NAME':'django.contrib.auth.password_validation.NumericPasswordValidator'}]
