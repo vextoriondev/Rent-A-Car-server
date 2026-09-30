@@ -10,7 +10,7 @@ This ZIP gives you **separate `frontend/` and `backend/` projects** to use in yo
 
 ### Local setup
 
-Requirements: Python 3.12+, Node.js 22+, Docker with Compose.
+Requirements: Python 3.11+ (developed against 3.11.9 and 3.12), Node.js 22+, Docker with Compose.
 
 ```bash
 # Terminal 1, from the ZIP root
@@ -71,6 +71,8 @@ cd ../frontend
 npm run typecheck
 npm run build
 ```
+
+On Windows, using the checked-in `backend/venv`: `USE_SQLITE=1 DJANGO_DEBUG=1 venv/Scripts/python.exe manage.py test rentals` runs the suite in a couple of seconds without Docker. SQLite ignores `select_for_update`, so the row-locking concurrency test in `rentals/tests/test_concurrency.py` is skipped in that mode; run it for real against PostgreSQL (`docker compose up -d` at the project root, env from `.env.example`, or any Postgres reachable via `DATABASE_URL`) before trusting the concurrency guarantees.
 
 ## Work still required for production
 

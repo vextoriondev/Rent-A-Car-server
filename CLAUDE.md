@@ -12,4 +12,4 @@ Plan and progress checklist: `docs/BACKEND_MODEL_PLAN.md`.
 
 ## Run
 
-From `backend/`: `USE_SQLITE=1 DJANGO_DEBUG=1 venv/Scripts/python.exe manage.py test rentals` (Windows venv is `backend/venv`, Python 3.11). SQLite ignores row locks; concurrency tests need PostgreSQL (`docker compose up -d` at the project root, env from `.env.example`). Full setup: `../README.md`.
+From `backend/`: `USE_SQLITE=1 DJANGO_DEBUG=1 venv/Scripts/python.exe manage.py test rentals` (Windows venv is `backend/venv`, Python 3.11). SQLite ignores row locks; concurrency tests need PostgreSQL (`docker compose up -d` at the project root, env from `.env.example`, or a `DATABASE_URL` in `backend/.env` pointing at Neon or any other Postgres). Against a pooled connection (Neon), add `--keepdb` — the pooler can leave a session or two attached right when the run ends, which makes Django's normal `DROP DATABASE test_<name>` teardown error out; `--keepdb` skips that and reuses the same test database next run. Full setup: `../README.md`.
