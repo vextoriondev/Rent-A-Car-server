@@ -3,7 +3,8 @@ import hashlib
 import json
 from decimal import Decimal, InvalidOperation
 from django.db import transaction
-from ..models import Period, JournalEntry, JournalLine, NotificationOutbox, IdempotencyRecord
+from django.db.models import Q
+from ..models import Agreement, Period, JournalEntry, JournalLine, NotificationOutbox, IdempotencyRecord
 
 ZERO=Decimal('0.00')
 class DomainError(Exception): pass
@@ -48,6 +49,9 @@ def validate_agreement(agreement):
     if agreement.vehicle.organization_id!=org or agreement.vehicle.owner.organization_id!=org or agreement.customer.organization_id!=org or agreement.driver.organization_id!=org:raise DomainError('Agreement relationships must belong to the organization')
     if agreement.vehicle.owner.kind!='owner' or agreement.customer.kind!='customer' or agreement.driver.kind!='driver':raise DomainError('Party roles do not match agreement')
     if agreement.end_date and agreement.end_date<agreement.start_date:raise DomainError('End date precedes start date')
+    clash=Agreement.objects.filter(vehicle_id=agreement.vehicle_id,active=True).exclude(pk=agreement.pk).filter(Q(end_date__isnull=True)|Q(end_date__gte=agreement.start_date))
+    if agreement.end_date:clash=clash.filter(start_date__lte=agreement.end_date)
+    if clash.exists():raise DomainError('Vehicle has an overlapping active agreement')
     if any(x<=0 for x in [agreement.customer_rent,agreement.owner_rent,agreement.driver_salary]):raise DomainError('Monthly terms must be positive')
 
 def locked_period(org,period_id):

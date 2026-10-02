@@ -12,7 +12,7 @@ class Command(BaseCommand):
         user=get_user_model().objects.filter(username=options['username']).first()
         if not user:raise CommandError('Create the user first with createsuperuser')
         org,_=Organization.objects.get_or_create(name='RentFlow Demo')
-        Membership.objects.get_or_create(organization=org,user=user,defaults={'role':'admin'})
+        Membership.objects.get_or_create(organization=org,user=user,defaults={'role':'admin','branch':services.default_branch(org)})
         def party(kind,name):return Party.objects.get_or_create(organization=org,kind=kind,name=name)[0]
         owner=party('owner','Farhana Rahman');customer=party('customer','Meridian Textiles Ltd.');driver=party('driver','Imran Hossain')
         vehicle,_=Vehicle.objects.get_or_create(organization=org,registration='DHA-METRO-GA-19-7724',defaults={'model_name':'Toyota Axio','owner':owner})

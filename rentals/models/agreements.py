@@ -16,6 +16,7 @@ class Agreement(models.Model):
     fuel_responsible = models.CharField(max_length=12,choices=[('owner','Owner'),('customer','Customer'),('operator','Operator')],default='owner')
     repair_responsible = models.CharField(max_length=12,choices=[('owner','Owner'),('customer','Customer'),('operator','Operator')],default='owner')
     owner_offset_allowed = models.BooleanField(default=False)
+    status = models.CharField(max_length=10,choices=[('draft','Draft'),('active','Active'),('ended','Ended')],default='active')
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     class Meta: indexes=[models.Index(fields=['organization','vehicle','start_date'])]
@@ -24,6 +25,7 @@ class Period(models.Model):
     organization = models.ForeignKey(Organization,on_delete=models.CASCADE)
     agreement = models.ForeignKey(Agreement,on_delete=models.PROTECT)
     month = models.DateField(help_text='First day of month')
+    agreement_version = models.ForeignKey('rentals.AgreementVersion',null=True,blank=True,on_delete=models.PROTECT,related_name='periods')
     closed_at = models.DateTimeField(null=True,blank=True)
     closed_by = models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.PROTECT,null=True,blank=True)
     class Meta: constraints=[models.UniqueConstraint(fields=['agreement','month'],name='unique_agreement_month')]

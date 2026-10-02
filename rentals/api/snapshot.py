@@ -7,7 +7,7 @@ router = Router()
 
 @router.get('/orgs/{org_id}/snapshot')
 def snapshot(request,org_id:int,month:date):
-    membership(request,org_id,('admin','accountant'))
+    membership(request,org_id,'snapshot.read')
     qs=Agreement.objects.filter(organization_id=org_id,active=True).select_related('vehicle__owner','customer','driver').order_by('pk')[:200]
     agreements=[];entries=[];closed=[];period_ids={};obligation_ids={};expense_ids={}
     for a in qs:
@@ -21,7 +21,7 @@ def snapshot(request,org_id:int,month:date):
         for e in p.expenses.all():
             public_id=f'EXP-{e.pk}'
             expense_ids[public_id]=e.pk
-            entries.append({'id':public_id,'agreementId':agreement_id,'type':'Expense','amount':float(e.amount),'date':e.event_date.isoformat(),'category':e.category.title(),'paidBy':e.paid_by.title(),'responsible':e.responsible.title(),'reference':e.reference,'description':e.description or e.category.title(),'status':{'pending':'Pending approval','posted':'Posted','reversed':'Reversed'}[e.state],'offset':e.offset_owner})
+            entries.append({'id':public_id,'agreementId':agreement_id,'type':'Expense','amount':float(e.amount),'date':e.event_date.isoformat(),'category':e.category.title(),'paidBy':e.paid_by.title(),'responsible':e.responsible.title(),'reference':e.reference,'description':e.description or e.category.title(),'status':{'draft':'Draft','pending':'Pending approval','posted':'Posted','reversed':'Reversed'}[e.state],'offset':e.offset_owner})
         for alloc in p.obligations.all():
             for row in alloc.allocations.select_related('payment').all():
                 pay=row.payment
