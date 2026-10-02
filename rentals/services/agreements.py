@@ -19,10 +19,10 @@ def issue_period(org,agreement_id,month):
     salary=assignment.salary_override or version.driver_salary
     period=Period.objects.create(organization=org,agreement=agreement,month=month,agreement_version=version)
     for kind,party,amount,lines in [
-        (Obligation.Kind.CUSTOMER,agreement.customer,version.customer_rent,[('CUSTOMER_RECEIVABLE',version.customer_rent,ZERO),('RENT_REVENUE',ZERO,version.customer_rent)]),
-        (Obligation.Kind.OWNER,owner,version.owner_rent,[('OWNER_RENT_EXPENSE',version.owner_rent,ZERO),('OWNER_PAYABLE',ZERO,version.owner_rent)]),
-        (Obligation.Kind.DRIVER,assignment.driver,salary,[('DRIVER_SALARY_EXPENSE',salary,ZERO),('DRIVER_PAYABLE',ZERO,salary)])]:
+        (Obligation.Kind.CUSTOMER,agreement.customer,version.customer_rent,[('CUSTOMER_RECEIVABLE',version.customer_rent,ZERO,agreement.customer),('RENT_REVENUE',ZERO,version.customer_rent)]),
+        (Obligation.Kind.OWNER,owner,version.owner_rent,[('OWNER_RENT_EXPENSE',version.owner_rent,ZERO),('OWNER_PAYABLE',ZERO,version.owner_rent,owner)]),
+        (Obligation.Kind.DRIVER,assignment.driver,salary,[('DRIVER_SALARY_EXPENSE',salary,ZERO),('DRIVER_PAYABLE',ZERO,salary,assignment.driver)])]:
         ob=Obligation.objects.create(period=period,kind=kind,party=party,amount=amount)
-        journal(org,'obligation',ob.pk,lines)
+        journal(org,'obligation',ob.pk,lines,period=period)
     notice(org,f'period:{period.pk}:customer',agreement.customer,'rent_issued',{'period_id':period.pk})
     return period

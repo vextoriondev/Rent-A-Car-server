@@ -26,6 +26,7 @@ ROLE_ACTIONS: dict[str,set[str]] = {
     'period.close':FINANCE,'notice.retry':FINANCE,'snapshot.read':FINANCE,
     'agreement.revise':FINANCE,'ownership.transfer':FINANCE,'driver.assign':{'admin','accountant','operations'},
     'expense.override':FINANCE,'rules.write':FINANCE,'category.write':{'admin'},
+    'charge.post':FINANCE,'invoice.issue':FINANCE,'ledger.read':{'admin','accountant','viewer'},
     'branch.write':{'admin'},'access.manage':{'admin'},
 }
 
