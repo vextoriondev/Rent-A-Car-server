@@ -5,7 +5,8 @@ from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from ninja import Router
 from ninja.errors import HttpError
 from ninja.utils import check_csrf
-from ..models import Organization, Membership
+from .. import policies, services
+from ..models import Organization, Membership, PartyUser
 from ._shared import LoginIn, RegisterIn
 
 router = Router()
@@ -16,7 +17,9 @@ def require_csrf(request:HttpRequest):
 
 @router.get('/me')
 def me(request):
-    return {'user_id':request.user.pk,'username':request.user.get_username(),'organizations':[{'id':m.organization_id,'name':m.organization.name,'role':m.role} for m in Membership.objects.filter(user=request.user).select_related('organization')]}
+    links={}
+    for link in PartyUser.objects.filter(user=request.user,active=True).select_related('party'):links.setdefault(link.organization_id,[]).append({'id':link.party_id,'kind':link.party.kind,'name':link.party.name})
+    return {'user_id':request.user.pk,'username':request.user.get_username(),'organizations':[{'id':m.organization_id,'name':m.organization.name,'role':m.role,'branch':{'id':m.branch_id,'name':m.branch.name} if m.branch_id else None,'parties':links.get(m.organization_id,[]),'actor':policies.is_actor(m.role)} for m in Membership.objects.filter(user=request.user).select_related('organization','branch')]}
 
 @router.get('/csrf',auth=None)
 @ensure_csrf_cookie
@@ -51,6 +54,6 @@ def register_view(request,payload:RegisterIn):
     with transaction.atomic():
         user=User.objects.create_user(username=username,email=payload.email.strip(),password=payload.password)
         org=Organization.objects.create(name=org_name)
-        Membership.objects.create(organization=org,user=user,role=Membership.Role.ADMIN)
+        Membership.objects.create(organization=org,user=user,role=Membership.Role.ADMIN,branch=services.default_branch(org))
     auth_login(request,user)
     return {'user_id':user.pk,'username':user.get_username(),'organization':{'id':org.pk,'name':org.name}}
