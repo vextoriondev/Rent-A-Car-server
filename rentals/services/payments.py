@@ -20,7 +20,8 @@ def record_payment(org,user,data,key):
     side={'customer_payment':'customer','owner_payout':'owner','driver_payout':'driver','salary_advance':'driver'}[kind]
     party_id=obligations[0].party_id
     for ob in obligations:
-        if ob.party.kind!=side or ob.kind==Obligation.Kind.CARRY_OUT or ob.party_id!=party_id or ob.period.closed_at:raise DomainError('Allocation party, type or period is invalid')
+        if ob.period.closed_at:raise DomainError('Period is closed; carry its balance forward and record the payment against the new opening balance')
+        if ob.party.kind!=side or ob.kind==Obligation.Kind.CARRY_OUT or ob.party_id!=party_id:raise DomainError('Allocation party, type or period is invalid')
         allocation_amount=bd(next(row['amount'] for row in allocations if row['obligation_id']==ob.pk))
         available=ob.amount-total(Allocation.objects.filter(obligation=ob))
         if ob.kind==Obligation.Kind.OWNER:available-=total(OwnerOffset.objects.filter(obligation=ob,expense__state=Expense.State.POSTED))

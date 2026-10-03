@@ -10,7 +10,7 @@ class BackfillTermsMigrationTests(TransactionTestCase):
         ex=MigrationExecutor(connection);ex.migrate([('rentals',target)]);return ex.loader.project_state([('rentals',target)]).apps
 
     def tearDown(self):
-        self.migrate('0007_backfill_terms_history')
+        ex=MigrationExecutor(connection);ex.migrate(ex.loader.graph.leaf_nodes())
 
     def test_backfill_from_legacy_rows(self):
         apps=self.migrate('0005_default_branches')

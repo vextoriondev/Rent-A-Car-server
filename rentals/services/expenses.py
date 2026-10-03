@@ -3,7 +3,8 @@ approvals, per-entry override, duplicate warning and proof-required enforcement.
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
-from ..models import AgreementVersion, Approval, Expense, ExpenseCategory, ExpenseRule, JournalEntry, Obligation, OwnerOffset
+from datetime import timedelta
+from ..models import Period, AgreementVersion, Approval, Expense, ExpenseCategory, ExpenseRule, JournalEntry, Obligation, OwnerOffset
 from .helpers import ZERO, DomainError, bd, replay, remember, journal, notice, locked_period, period_parties
 from .statements import statement
 
@@ -107,16 +108,29 @@ def post_expense_locked(expense,approver=None):
     notice(p.organization,f'expense:{expense.pk}:owner',p.obligations.get(kind=Obligation.Kind.OWNER).party,'expense_posted',{'expense_id':expense.public_id}) if expense.responsible=='owner' else None
     return expense
 
+def _target_period(org,data):
+    """The period an entry posts to. A closed period never takes the entry silently: with late_entry=true it goes to the next
+    open period of the agreement as a linked adjustment (adjusts_period), otherwise it is refused with instructions."""
+    period=Period.objects.select_for_update(of=('self',)).select_related('agreement','agreement_version').get(pk=data['period_id'],organization=org)
+    if not period.closed_at:return period,None
+    nxt=(period.month.replace(day=28)+timedelta(days=4)).replace(day=1)
+    if not data.get('late_entry'):raise DomainError(f'Period is closed; resubmit with late_entry=true to post it as an adjustment in {nxt:%Y-%m}')
+    target=Period.objects.select_for_update(of=('self',)).select_related('agreement','agreement_version').filter(organization=org,agreement=period.agreement,month=nxt).first()
+    if not target:raise DomainError(f'Issue {nxt:%Y-%m} first, then post the late entry as an adjustment there')
+    if target.closed_at:raise DomainError(f'{nxt:%Y-%m} is closed too; reopen it or post the entry in a later open period')
+    return target,period
+
 @transaction.atomic
 def record_expense(org,user,data,key,can_override=False):
     """Record (or, with data['draft'], save a draft of) one expense. Idempotent per key."""
     existing=replay(org,'expense',key,data,Expense)
     if existing:return existing
-    p=locked_period(org,data['period_id'])
+    p,adjusts=_target_period(org,data)
     fields,resolved,overridden=_prepare(org,p,data,can_override)
+    if adjusts:fields['description']=f"Late entry for {adjusts.month:%Y-%m}: {fields['description']}".strip()
     draft=bool(data.get('draft'))
     if not draft:_require_proof(fields,resolved)
-    expense=Expense.objects.create(period=p,recorded_by=user,state=Expense.State.DRAFT if draft else Expense.State.PENDING,overridden_by=user if overridden else None,**fields)
+    expense=Expense.objects.create(period=p,adjusts_period=adjusts,recorded_by=user,state=Expense.State.DRAFT if draft else Expense.State.PENDING,overridden_by=user if overridden else None,**fields)
     if not draft:_route(expense,user,resolved,overridden)
     remember(org,'expense',key,data,expense)
     return expense
