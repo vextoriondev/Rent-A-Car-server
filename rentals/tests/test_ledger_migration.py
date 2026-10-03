@@ -12,7 +12,7 @@ class BackfillLedgerMigrationTests(TransactionTestCase):
         ex=MigrationExecutor(connection);ex.migrate([('rentals',target)]);return ex.loader.project_state([('rentals',target)]).apps
 
     def tearDown(self):
-        self.migrate('0011_backfill_ledger_dimensions')
+        ex=MigrationExecutor(connection);ex.migrate(ex.loader.graph.leaf_nodes())
 
     def test_backfill_from_legacy_journal(self):
         apps=self.migrate('0010_ledger_accounts_charges_invoices')

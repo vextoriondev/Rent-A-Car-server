@@ -6,7 +6,7 @@ from django.db import IntegrityError
 from django.http import HttpRequest
 from ninja import Schema
 from ninja.errors import HttpError
-from ..models import Membership, Party, Vehicle, Agreement, Period, Obligation, Expense, Contact, AgreementVersion, Invoice
+from ..models import Membership, Party, Vehicle, Agreement, Period, Obligation, Expense, Contact, AgreementVersion, Invoice, Settlement
 from .. import services, policies
 
 class PartyIn(Schema): kind:Literal['owner','driver','customer']; name:str; phone:str=''; email:str=''
@@ -19,7 +19,7 @@ class AgreementIn(Schema):
     owner_offset_allowed:bool=False
 class ExpenseIn(Schema):
     period_id:int; category:str; amount:Decimal; event_date:date; paid_by:Literal['operator','owner']; responsible:Literal['owner','operator','customer']; offset_owner:bool=False; reference:str; description:str=''
-    draft:bool=False; receipt_reference:str=''; override_reason:str=''; allow_duplicate_reason:str=''
+    draft:bool=False; receipt_reference:str=''; override_reason:str=''; allow_duplicate_reason:str=''; late_entry:bool=False
 class ExpensePatch(Schema):
     category:str|None=None; amount:Decimal|None=None; event_date:date|None=None; paid_by:Literal['operator','owner']|None=None; responsible:Literal['owner','operator','customer']|None=None; offset_owner:bool|None=None; reference:str|None=None; description:str|None=None
     receipt_reference:str|None=None; override_reason:str|None=None; allow_duplicate_reason:str|None=None
@@ -32,6 +32,7 @@ class PaymentIn(Schema):
     kind:Literal['customer_payment','owner_payout','driver_payout','salary_advance']
     amount:Decimal; reference:str; method:str='bank'; event_date:date; allocations:list[AllocationIn]
 class ReasonIn(Schema): reason:str
+class SettingsIn(Schema): cutoff_day:int|None=None; approval_role:Literal['admin','accountant']|None=None; negative_owner_blocks_close:bool|None=None
 class ChargeIn(Schema):
     period_id:int; side:Literal['customer','owner','driver']; kind:Literal['charge','credit','adjustment','reimbursement','opening_balance']
     amount:Decimal; direction:Literal['increase','decrease']|None=None; description:str=''; reference:str=''
@@ -68,7 +69,7 @@ def membership(request:HttpRequest,org_id:int,action:str|None=None):
 def result(fn,*args,**kwargs):
     try:return fn(*args,**kwargs)
     except services.DomainError as exc:raise HttpError(422,str(exc)) from exc
-    except (Period.DoesNotExist,Agreement.DoesNotExist,Expense.DoesNotExist,Party.DoesNotExist,Vehicle.DoesNotExist,Obligation.DoesNotExist,Contact.DoesNotExist,AgreementVersion.DoesNotExist,Invoice.DoesNotExist):raise HttpError(404,'Record not found')
+    except (Period.DoesNotExist,Agreement.DoesNotExist,Expense.DoesNotExist,Party.DoesNotExist,Vehicle.DoesNotExist,Obligation.DoesNotExist,Contact.DoesNotExist,AgreementVersion.DoesNotExist,Invoice.DoesNotExist,Settlement.DoesNotExist):raise HttpError(404,'Record not found')
     except IntegrityError as exc:raise HttpError(409,'Duplicate or conflicting record') from exc
 
 def agreement_dict(a):
@@ -97,6 +98,11 @@ def charge_dict(c):
 
 def invoice_dict(i,summary):
     return {'id':i.pk,'number':i.number,'party_id':i.party_id,'period_id':i.period_id,'issue_date':i.issue_date.isoformat(),'due_date':i.due_date.isoformat(),'state':i.state,'status':summary['status'],'amount':str(summary['amount']),'paid':str(summary['paid']),'outstanding':str(summary['outstanding']),'lines':[{'obligation_id':l.obligation_id,'description':l.description,'amount':str(l.amount)} for l in i.lines.all()]}
+
+def settlement_dict(s,lines=False):
+    d={'id':s.pk,'period_id':s.period_id,'agreement_id':s.agreement_id,'month':s.month.isoformat(),'state':s.state,'version':s.version,'prepared_at':s.prepared_at.isoformat() if s.prepared_at else None,'approved_at':s.approved_at.isoformat() if s.approved_at else None,'closed_at':s.closed_at.isoformat() if s.closed_at else None,'reopen_reason':s.reopen_reason}
+    if lines:d['lines']=[{'section':l.section,'label':l.label,'amount':str(l.amount),'source_type':l.source_type,'source_id':l.source_id} for l in s.lines.all()]
+    return d
 
 def money_dict(value):
     if isinstance(value,Decimal):return str(value)
