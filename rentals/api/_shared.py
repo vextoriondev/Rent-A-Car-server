@@ -6,7 +6,7 @@ from django.db import IntegrityError
 from django.http import HttpRequest
 from ninja import Schema
 from ninja.errors import HttpError
-from ..models import Membership, Party, Vehicle, Agreement, Period, Obligation, Expense, Contact, AgreementVersion
+from ..models import Membership, Party, Vehicle, Agreement, Period, Obligation, Expense, Contact, AgreementVersion, Invoice
 from .. import services, policies
 
 class PartyIn(Schema): kind:Literal['owner','driver','customer']; name:str; phone:str=''; email:str=''
@@ -32,6 +32,10 @@ class PaymentIn(Schema):
     kind:Literal['customer_payment','owner_payout','driver_payout','salary_advance']
     amount:Decimal; reference:str; method:str='bank'; event_date:date; allocations:list[AllocationIn]
 class ReasonIn(Schema): reason:str
+class ChargeIn(Schema):
+    period_id:int; side:Literal['customer','owner','driver']; kind:Literal['charge','credit','adjustment','reimbursement','opening_balance']
+    amount:Decimal; direction:Literal['increase','decrease']|None=None; description:str=''; reference:str=''
+class InvoiceIn(Schema): period_id:int; obligation_ids:list[int]|None=None; issue_date:date|None=None; due_date:date|None=None
 class TermsIn(Schema):
     customer_rent:Decimal|None=None; owner_rent:Decimal|None=None; driver_salary:Decimal|None=None
     fuel_responsible:Literal['owner','operator','customer']|None=None; repair_responsible:Literal['owner','operator','customer']|None=None
@@ -64,7 +68,7 @@ def membership(request:HttpRequest,org_id:int,action:str|None=None):
 def result(fn,*args,**kwargs):
     try:return fn(*args,**kwargs)
     except services.DomainError as exc:raise HttpError(422,str(exc)) from exc
-    except (Period.DoesNotExist,Agreement.DoesNotExist,Expense.DoesNotExist,Party.DoesNotExist,Vehicle.DoesNotExist,Obligation.DoesNotExist,Contact.DoesNotExist,AgreementVersion.DoesNotExist):raise HttpError(404,'Record not found')
+    except (Period.DoesNotExist,Agreement.DoesNotExist,Expense.DoesNotExist,Party.DoesNotExist,Vehicle.DoesNotExist,Obligation.DoesNotExist,Contact.DoesNotExist,AgreementVersion.DoesNotExist,Invoice.DoesNotExist):raise HttpError(404,'Record not found')
     except IntegrityError as exc:raise HttpError(409,'Duplicate or conflicting record') from exc
 
 def agreement_dict(a):
@@ -87,6 +91,12 @@ def agreement_detail(a):
     d['driver_assignments']=[{'driver_id':x.driver_id,'driver':x.driver.name,'effective_from':x.effective_from.isoformat(),'effective_to':x.effective_to.isoformat() if x.effective_to else None,'salary_override':str(x.salary_override) if x.salary_override is not None else None} for x in a.driver_assignments.select_related('driver').order_by('effective_from')]
     d['ownerships']=[{'owner_id':x.owner_id,'owner':x.owner.name,'effective_from':x.effective_from.isoformat(),'effective_to':x.effective_to.isoformat() if x.effective_to else None} for x in a.vehicle.ownerships.select_related('owner').order_by('effective_from')]
     return d
+
+def charge_dict(c):
+    return {'id':c.pk,'kind':c.kind,'direction':c.direction,'side':c.side,'party_id':c.party_id,'period_id':c.period_id,'amount':str(c.amount),'description':c.description,'reference':c.reference,'obligation_id':c.obligation_id}
+
+def invoice_dict(i,summary):
+    return {'id':i.pk,'number':i.number,'party_id':i.party_id,'period_id':i.period_id,'issue_date':i.issue_date.isoformat(),'due_date':i.due_date.isoformat(),'state':i.state,'status':summary['status'],'amount':str(summary['amount']),'paid':str(summary['paid']),'outstanding':str(summary['outstanding']),'lines':[{'obligation_id':l.obligation_id,'description':l.description,'amount':str(l.amount)} for l in i.lines.all()]}
 
 def money_dict(value):
     if isinstance(value,Decimal):return str(value)

@@ -31,10 +31,13 @@ class Period(models.Model):
     class Meta: constraints=[models.UniqueConstraint(fields=['agreement','month'],name='unique_agreement_month')]
 
 class Obligation(models.Model):
-    class Kind(models.TextChoices): CUSTOMER='customer_rent','Customer rent'; OWNER='owner_rent','Owner rent'; DRIVER='driver_salary','Driver salary'
+    class Kind(models.TextChoices):
+        CUSTOMER='customer_rent','Customer rent'; OWNER='owner_rent','Owner rent'; DRIVER='driver_salary','Driver salary'
+        CHARGE='charge','Charge'; CREDIT='credit','Credit'; ADJUSTMENT='adjustment','Adjustment'; REIMBURSEMENT='reimbursement','Reimbursement'
+        OPENING='opening_balance','Opening balance'; CARRY_OUT='carry_out','Carried forward'
     period = models.ForeignKey(Period,on_delete=models.PROTECT,related_name='obligations')
     kind = models.CharField(max_length=20,choices=Kind.choices)
     party = models.ForeignKey(Party,on_delete=models.PROTECT)
     amount = models.DecimalField(max_digits=14,decimal_places=2)
     created_at = models.DateTimeField(auto_now_add=True)
-    class Meta: constraints=[models.UniqueConstraint(fields=['period','kind'],name='unique_period_obligation')]
+    class Meta: constraints=[models.UniqueConstraint(fields=['period','kind'],condition=models.Q(kind__in=['customer_rent','owner_rent','driver_salary']),name='unique_period_obligation')]

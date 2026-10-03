@@ -4,7 +4,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 from ..models import AgreementVersion, Approval, Expense, ExpenseCategory, ExpenseRule, JournalEntry, Obligation, OwnerOffset
-from .helpers import ZERO, DomainError, bd, replay, remember, journal, notice, locked_period
+from .helpers import ZERO, DomainError, bd, replay, remember, journal, notice, locked_period, period_parties
 from .statements import statement
 
 DEFAULT_CATEGORIES=[('fuel','Fuel / gas'),('toll','Toll / parking'),('maintenance','Routine maintenance'),('repair','Repairs'),('damage','Damage'),('cleaning','Cleaning'),('driver_allowance','Driver allowance'),('other','Miscellaneous')]
@@ -99,9 +99,11 @@ def post_expense_locked(expense,approver=None):
     expense.save(update_fields=['state','approved_by'])
     if expense.paid_by=='operator':
         debit_account={'operator':'OPERATING_EXPENSE','owner':'OWNER_RECOVERABLE','customer':'CUSTOMER_RECOVERABLE'}[expense.responsible]
-        lines=[(debit_account,expense.amount,ZERO),('CASH',ZERO,expense.amount)]
-        if expense.offset_owner:lines += [('OWNER_PAYABLE',expense.amount,ZERO),('OWNER_RECOVERABLE',ZERO,expense.amount)]
-        journal(p.organization,'expense',expense.pk,lines)
+        parties=period_parties(p)
+        debit_party={'owner':parties['owner'],'customer':parties['customer']}.get(expense.responsible)
+        lines=[(debit_account,expense.amount,ZERO,debit_party),('CASH',ZERO,expense.amount)]
+        if expense.offset_owner:lines += [('OWNER_PAYABLE',expense.amount,ZERO,parties['owner']),('OWNER_RECOVERABLE',ZERO,expense.amount,parties['owner'])]
+        journal(p.organization,'expense',expense.pk,lines,period=p)
     notice(p.organization,f'expense:{expense.pk}:owner',p.obligations.get(kind=Obligation.Kind.OWNER).party,'expense_posted',{'expense_id':expense.public_id}) if expense.responsible=='owner' else None
     return expense
 
@@ -166,7 +168,7 @@ def reverse_expense(org,user,expense_id,reason):
     locked_period(org,expense.period_id)
     if expense.state!=Expense.State.POSTED:raise DomainError('Only posted expenses can be reversed')
     original=JournalEntry.objects.filter(organization=org,source_type='expense',source_id=str(expense.pk)).first()
-    if original:journal(org,'expense_reversal',expense.pk,[(line.account,line.credit,line.debit) for line in original.lines.all()])
+    if original:journal(org,'expense_reversal',expense.pk,[(line.account,line.credit,line.debit,line.party,line.period) for line in original.lines.select_related('party','period')])
     expense.state=Expense.State.REVERSED
     expense.reversed_by=user
     expense.reversed_at=timezone.now()

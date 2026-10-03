@@ -1,10 +1,10 @@
 """Shared building blocks for the domain services: money parsing, idempotency replay and the balanced journal."""
 import hashlib
 import json
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation  # noqa
 from django.db import transaction
 from django.db.models import Q
-from ..models import Agreement, Period, JournalEntry, JournalLine, NotificationOutbox, IdempotencyRecord
+from ..models import Account, Agreement, Period, JournalEntry, JournalLine, NotificationOutbox, IdempotencyRecord
 
 ZERO=Decimal('0.00')
 class DomainError(Exception): pass
@@ -33,13 +33,36 @@ def replay(org,action,key,data,model):
 def remember(org,action,key,data,obj):
     IdempotencyRecord.objects.create(organization=org,action=action,key=key,payload_hash=fingerprint(data),object_id=obj.pk)
 
-def journal(org,source_type,source_id,lines):
-    debit=sum((Decimal(str(d)) for _,d,_ in lines),ZERO)
-    credit=sum((Decimal(str(c)) for _,_,c in lines),ZERO)
+CHART=[('CASH','Cash and bank','asset',''),('CUSTOMER_RECEIVABLE','Customer receivable','asset','customer'),('RENT_REVENUE','Rent revenue','revenue',''),('OTHER_REVENUE','Other revenue','revenue',''),
+    ('OWNER_RENT_EXPENSE','Owner rent expense','expense',''),('OWNER_PAYABLE','Owner payable','liability','owner'),('DRIVER_SALARY_EXPENSE','Driver salary expense','expense',''),('DRIVER_PAYABLE','Driver payable','liability','driver'),
+    ('OPERATING_EXPENSE','Operating expense','expense',''),('OWNER_RECOVERABLE','Owner recoverable','asset','owner'),('CUSTOMER_RECOVERABLE','Customer recoverable','asset','customer'),('OPENING_BALANCE','Opening balance equity','equity','')]
+
+def ensure_accounts(org):
+    found={a.code:a for a in Account.objects.filter(organization=org)}
+    for code,name,kind,sub in CHART:
+        if code not in found:found[code]=Account.objects.create(organization=org,code=code,name=name,type=kind,subledger_kind=sub)
+    return found
+
+def journal(org,source_type,source_id,lines,period=None):
+    """Post one balanced entry. A line is (account_code, debit, credit[, party[, period]]); lines without their own period use `period`.
+    Each line carries party/agreement/period/vehicle dimensions so the ledger can be read per period and party."""
+    debit=sum((Decimal(str(l[1])) for l in lines),ZERO)
+    credit=sum((Decimal(str(l[2])) for l in lines),ZERO)
     if debit!=credit or debit<=0: raise DomainError('Journal is not balanced')
+    accounts=ensure_accounts(org)
     entry=JournalEntry.objects.create(organization=org,source_type=source_type,source_id=str(source_id))
-    JournalLine.objects.bulk_create([JournalLine(entry=entry,account=account,debit=d,credit=c) for account,d,c in lines])
+    rows=[]
+    for l in lines:
+        party=l[3] if len(l)>3 else None
+        p=l[4] if len(l)>4 and l[4] is not None else period
+        rows.append(JournalLine(entry=entry,account=l[0],account_ref=accounts[l[0]],debit=l[1],credit=l[2],party=party,period=p,agreement_id=p.agreement_id if p else None,vehicle_id=p.agreement.vehicle_id if p else None))
+    JournalLine.objects.bulk_create(rows)
     return entry
+
+def period_parties(period):
+    """Customer, owner and driver parties the period was issued with (the obligations carry them, so history survives reassignment)."""
+    by_kind={o.kind:o.party for o in period.obligations.select_related('party').filter(kind__in=['customer_rent','owner_rent','driver_salary'])}
+    return {'customer':by_kind.get('customer_rent') or period.agreement.customer,'owner':by_kind['owner_rent'],'driver':by_kind['driver_salary']}
 
 def notice(org,event_key,party,event_type,payload):
     NotificationOutbox.objects.get_or_create(organization=org,event_key=event_key,recipient=party,defaults={'event_type':event_type,'payload':payload})
