@@ -2,7 +2,7 @@ from ninja import Router
 from ninja.errors import HttpError
 from .. import policies, services
 from ..models import Expense, ExpenseCategory, ExpenseRule
-from ._shared import ExpenseIn, ExpensePatch, CategoryIn, RuleIn, ReasonIn, membership, result, expense_dict, rule_dict
+from ._shared import ExpenseIn, ExpensePatch, CategoryIn, RuleIn, ReasonIn, membership, result, expense_dict, rule_dict, paginate
 
 router = Router()
 
@@ -13,11 +13,11 @@ def record_expense(request,org_id:int,payload:ExpenseIn):
     return expense_dict(e)
 
 @router.get('/orgs/{org_id}/expenses')
-def expenses(request,org_id:int,period_id:int|None=None):
+def expenses(request,org_id:int,period_id:int|None=None,limit:int=100,offset:int=0):
     membership(request,org_id,'read_financial')
     qs=Expense.objects.filter(period__organization_id=org_id)
     if period_id:qs=qs.filter(period_id=period_id)
-    return [expense_dict(e) for e in qs.order_by('-id')[:200]]
+    return paginate(qs.order_by('-id'),limit,offset,lambda e:expense_dict(e))
 
 @router.post('/orgs/{org_id}/expenses/{expense_id}/approve')
 def approve_expense(request,org_id:int,expense_id:int):

@@ -2,14 +2,14 @@ from ninja import Router
 from ninja.errors import HttpError
 from .. import policies
 from ..models import NotificationOutbox
-from ._shared import membership
+from ._shared import membership, paginate
 
 router = Router()
 
 @router.get('/orgs/{org_id}/notifications')
-def notifications(request,org_id:int):
+def notifications(request,org_id:int,limit:int=100,offset:int=0):
     m=membership(request,org_id,'read')
-    return [{'id':n.pk,'event_type':n.event_type,'recipient':n.recipient.name,'state':n.state,'attempts':n.attempts,'created_at':n.created_at.isoformat()} for n in policies.scope_queryset(request.user,m,NotificationOutbox.objects.all()).select_related('recipient').order_by('-id')[:200]]
+    return paginate(policies.scope_queryset(request.user,m,NotificationOutbox.objects.all()).select_related('recipient').order_by('-id'),limit,offset,lambda n:{'id':n.pk,'event_type':n.event_type,'recipient':n.recipient.name,'state':n.state,'attempts':n.attempts,'created_at':n.created_at.isoformat()})
 
 @router.post('/orgs/{org_id}/notifications/{notice_id}/retry')
 def retry_notice(request,org_id:int,notice_id:int):

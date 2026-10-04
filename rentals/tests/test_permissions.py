@@ -50,10 +50,10 @@ class PermissionTests(RentalsTestCase):
         for path in ('/parties','/vehicles','/agreements','/periods','/expenses','/payments',f'/periods/{self.period.pk}/statement'):self.assertEqual(c.get(f'/api/v1/orgs/{self.org.pk}{path}').status_code,404,path)
 
     def test_owner_sees_only_own_vehicles_and_agreements(self):
-        cars=self.get('owner','/vehicles').json();self.assertEqual([v['id'] for v in cars],[self.car.pk])
+        cars=self.get('owner','/vehicles').json()['items'];self.assertEqual([v['id'] for v in cars],[self.car.pk])
         items=self.get('owner','/agreements').json()['items'];self.assertEqual([a['id'] for a in items],[self.agreement.pk])
-        self.assertEqual([p['id'] for p in self.get('owner','/parties').json()],[self.owner.pk])
-        self.assertEqual({p['id'] for p in self.get('owner','/periods').json()},{self.period.pk})
+        self.assertEqual([p['id'] for p in self.get('owner','/parties').json()['items']],[self.owner.pk])
+        self.assertEqual({p['id'] for p in self.get('owner','/periods').json()['items']},{self.period.pk})
 
     def test_driver_never_sees_customer_rent_or_owner_terms(self):
         item=next(a for a in self.get('driver','/agreements').json()['items'] if a['id']==self.agreement.pk)
@@ -72,16 +72,16 @@ class PermissionTests(RentalsTestCase):
             self.assertEqual(self.get(role,'/snapshot?month=2026-09-01').status_code,403)
 
     def test_mechanic_sees_vehicles_only(self):
-        self.assertEqual(len(self.get('mechanic','/vehicles').json()),2)
+        self.assertEqual(len(self.get('mechanic','/vehicles').json()['items']),2)
         self.assertEqual(self.get('mechanic','/agreements').json()['items'],[])
-        self.assertEqual(self.get('mechanic','/parties').json(),[])
+        self.assertEqual(self.get('mechanic','/parties').json()['items'],[])
 
     def test_sensitive_party_data_is_staff_finance_only(self):
         services.set_consent(self.org,self.owner.pk,sms=True,preferred_channel='sms',source='signed form')
         services.add_contact(self.org,self.customer.pk,{'name':'Accounts Desk','role':'billing','email':'ap@meridian.example'})
-        admin_view={p['id']:p for p in self.get('admin','/parties').json()}
+        admin_view={p['id']:p for p in self.get('admin','/parties').json()['items']}
         self.assertTrue(admin_view[self.owner.pk]['consent']['sms']);self.assertEqual(admin_view[self.customer.pk]['contacts'][0]['role'],'billing')
-        for role in ('operations','viewer','owner'):self.assertNotIn('consent',self.get(role,'/parties').json()[0],role)
+        for role in ('operations','viewer','owner'):self.assertNotIn('consent',self.get(role,'/parties').json()['items'][0],role)
 
     def test_me_reports_roles_branch_and_linked_parties(self):
         branch=services.default_branch(self.org);m=Membership.objects.get(user=self.users['owner']);m.branch=branch;m.save()

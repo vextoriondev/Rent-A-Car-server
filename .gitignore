@@ -8,6 +8,7 @@ db.sqlite3-journal
 .env
 staticfiles/
 media/
+private_media/
 *.log
 .pytest_cache/
 .mypy_cache/

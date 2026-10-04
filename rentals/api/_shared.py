@@ -6,7 +6,7 @@ from django.db import IntegrityError
 from django.http import HttpRequest
 from ninja import Schema
 from ninja.errors import HttpError
-from ..models import Membership, Party, Vehicle, Agreement, Period, Obligation, Expense, Contact, AgreementVersion, Invoice, Settlement
+from ..models import Membership, Party, Vehicle, Agreement, Period, Obligation, Expense, Contact, AgreementVersion, Invoice, Settlement, MaintenanceCase, Document
 from .. import services, policies
 
 class PartyIn(Schema): kind:Literal['owner','driver','customer']; name:str; phone:str=''; email:str=''
@@ -19,7 +19,7 @@ class AgreementIn(Schema):
     owner_offset_allowed:bool=False
 class ExpenseIn(Schema):
     period_id:int; category:str; amount:Decimal; event_date:date; paid_by:Literal['operator','owner']; responsible:Literal['owner','operator','customer']; offset_owner:bool=False; reference:str; description:str=''
-    draft:bool=False; receipt_reference:str=''; override_reason:str=''; allow_duplicate_reason:str=''; late_entry:bool=False
+    draft:bool=False; receipt_reference:str=''; override_reason:str=''; allow_duplicate_reason:str=''; late_entry:bool=False; maintenance_case_id:int|None=None
 class ExpensePatch(Schema):
     category:str|None=None; amount:Decimal|None=None; event_date:date|None=None; paid_by:Literal['operator','owner']|None=None; responsible:Literal['owner','operator','customer']|None=None; offset_owner:bool|None=None; reference:str|None=None; description:str|None=None
     receipt_reference:str|None=None; override_reason:str|None=None; allow_duplicate_reason:str|None=None
@@ -32,6 +32,8 @@ class PaymentIn(Schema):
     kind:Literal['customer_payment','owner_payout','driver_payout','salary_advance']
     amount:Decimal; reference:str; method:str='bank'; event_date:date; allocations:list[AllocationIn]
 class ReasonIn(Schema): reason:str
+class CaseIn(Schema): vehicle_id:int; issue:str; vendor:str=''; quote:Decimal|None=None; downtime_from:date|None=None; downtime_to:date|None=None
+class CasePatch(Schema): issue:str|None=None; vendor:str|None=None; quote:Decimal|None=None; downtime_from:date|None=None; downtime_to:date|None=None; status:Literal['in_progress','done','cancelled']|None=None
 class SettingsIn(Schema): cutoff_day:int|None=None; approval_role:Literal['admin','accountant']|None=None; negative_owner_blocks_close:bool|None=None
 class ChargeIn(Schema):
     period_id:int; side:Literal['customer','owner','driver']; kind:Literal['charge','credit','adjustment','reimbursement','opening_balance']
@@ -69,7 +71,7 @@ def membership(request:HttpRequest,org_id:int,action:str|None=None):
 def result(fn,*args,**kwargs):
     try:return fn(*args,**kwargs)
     except services.DomainError as exc:raise HttpError(422,str(exc)) from exc
-    except (Period.DoesNotExist,Agreement.DoesNotExist,Expense.DoesNotExist,Party.DoesNotExist,Vehicle.DoesNotExist,Obligation.DoesNotExist,Contact.DoesNotExist,AgreementVersion.DoesNotExist,Invoice.DoesNotExist,Settlement.DoesNotExist):raise HttpError(404,'Record not found')
+    except (Period.DoesNotExist,Agreement.DoesNotExist,Expense.DoesNotExist,Party.DoesNotExist,Vehicle.DoesNotExist,Obligation.DoesNotExist,Contact.DoesNotExist,AgreementVersion.DoesNotExist,Invoice.DoesNotExist,Settlement.DoesNotExist,MaintenanceCase.DoesNotExist,Document.DoesNotExist):raise HttpError(404,'Record not found')
     except IntegrityError as exc:raise HttpError(409,'Duplicate or conflicting record') from exc
 
 def agreement_dict(a):
@@ -104,13 +106,27 @@ def settlement_dict(s,lines=False):
     if lines:d['lines']=[{'section':l.section,'label':l.label,'amount':str(l.amount),'source_type':l.source_type,'source_id':l.source_id} for l in s.lines.all()]
     return d
 
+def case_dict(c):
+    return {'id':c.pk,'vehicle_id':c.vehicle_id,'issue':c.issue,'vendor':c.vendor,'quote':str(c.quote) if c.quote is not None else None,'downtime_from':c.downtime_from.isoformat() if c.downtime_from else None,'downtime_to':c.downtime_to.isoformat() if c.downtime_to else None,'status':c.status,'reported_by':c.reported_by_id,'approved_at':c.approved_at.isoformat() if c.approved_at else None}
+
+def document_dict(d):
+    return {'id':d.pk,'target_type':d.target_type,'target_id':d.target_id,'name':d.original_name,'content_type':d.content_type,'size':d.size,'sha256':d.sha256,'created_at':d.created_at.isoformat()}
+
+def audit_dict(a):
+    return {'id':a.pk,'at':a.at.isoformat(),'actor_id':a.actor_id,'action':a.action,'target_type':a.target_type,'target_id':a.target_id,'before':a.before,'after':a.after,'reason':a.reason,'request_id':a.request_id,'ip':a.ip}
+
+def paginate(qs,limit,offset,serialize):
+    """Shared list envelope {count, items, next}; next is the offset of the following page or null. Limit is capped at 200."""
+    limit=min(200,max(1,limit));offset=max(0,offset);count=qs.count()
+    return {'count':count,'items':[serialize(x) for x in qs[offset:offset+limit]],'next':offset+limit if offset+limit<count else None}
+
 def money_dict(value):
     if isinstance(value,Decimal):return str(value)
     if isinstance(value,dict):return {k:money_dict(v) for k,v in value.items()}
     return value
 
 def expense_dict(e):
-    return {'id':e.pk,'public_id':e.public_id,'period_id':e.period_id,'amount':str(e.amount),'category':e.category,'paid_by':e.paid_by,'responsible':e.responsible,'offset_owner':e.offset_owner,'reference':e.reference,'state':e.state,'rule_snapshot':e.rule_snapshot,'reversal_reason':e.reversal_reason,'receipt_reference':e.receipt_reference,'override_reason':e.override_reason,'duplicate_reason':e.duplicate_reason,'rule_id':e.rule_id}
+    return {'id':e.pk,'public_id':e.public_id,'period_id':e.period_id,'amount':str(e.amount),'category':e.category,'paid_by':e.paid_by,'responsible':e.responsible,'offset_owner':e.offset_owner,'reference':e.reference,'state':e.state,'rule_snapshot':e.rule_snapshot,'reversal_reason':e.reversal_reason,'receipt_reference':e.receipt_reference,'override_reason':e.override_reason,'duplicate_reason':e.duplicate_reason,'rule_id':e.rule_id,'maintenance_case_id':e.maintenance_case_id}
 
 def payment_dict(p):
     return {'id':p.pk,'public_id':p.public_id,'kind':p.kind,'party_id':p.party_id,'amount':str(p.amount),'reference':p.reference,'allocations':[{'obligation_id':x.obligation_id,'amount':str(x.amount)} for x in p.allocations.all()]}

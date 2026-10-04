@@ -3,7 +3,7 @@ from ninja import Router
 from ninja.errors import HttpError
 from .. import services
 from ..models import Account, Charge, Invoice, Period
-from ._shared import ChargeIn, InvoiceIn, ReasonIn, membership, result, charge_dict, invoice_dict, money_dict
+from ._shared import ChargeIn, InvoiceIn, ReasonIn, membership, result, charge_dict, invoice_dict, money_dict, paginate
 
 router = Router()
 
@@ -19,11 +19,11 @@ def post_charge(request,org_id:int,payload:ChargeIn):
     return charge_dict(result(services.post_charge,m.organization,request.user,payload.dict(),request.headers.get('Idempotency-Key','')))
 
 @router.get('/orgs/{org_id}/charges')
-def charges(request,org_id:int,period_id:int|None=None):
+def charges(request,org_id:int,period_id:int|None=None,limit:int=100,offset:int=0):
     m=membership(request,org_id,'read_financial')
     qs=Charge.objects.filter(organization=m.organization)
     if period_id:qs=qs.filter(period_id=period_id)
-    return [charge_dict(c) for c in qs.order_by('-id')[:200]]
+    return paginate(qs.order_by('-id'),limit,offset,lambda c:charge_dict(c))
 
 @router.post('/orgs/{org_id}/periods/{period_id}/carry-forward')
 def carry_forward(request,org_id:int,period_id:int):
@@ -53,11 +53,11 @@ def issue_invoice(request,org_id:int,payload:InvoiceIn):
     return invoice_dict(i,services.invoice_summary(i))
 
 @router.get('/orgs/{org_id}/invoices')
-def invoices(request,org_id:int,period_id:int|None=None):
+def invoices(request,org_id:int,period_id:int|None=None,limit:int=100,offset:int=0):
     m=membership(request,org_id,'read_financial')
     qs=Invoice.objects.filter(organization=m.organization).prefetch_related('lines')
     if period_id:qs=qs.filter(period_id=period_id)
-    return [invoice_dict(i,services.invoice_summary(i)) for i in qs.order_by('-id')[:200]]
+    return paginate(qs.order_by('-id'),limit,offset,lambda i:invoice_dict(i,services.invoice_summary(i)))
 
 @router.get('/orgs/{org_id}/invoices/{invoice_id}')
 def invoice(request,org_id:int,invoice_id:int):

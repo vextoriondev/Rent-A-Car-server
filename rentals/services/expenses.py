@@ -4,13 +4,15 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 from datetime import timedelta
-from ..models import Period, AgreementVersion, Approval, Expense, ExpenseCategory, ExpenseRule, JournalEntry, Obligation, OwnerOffset
+from ..models import Document, MaintenanceCase, Period, AgreementVersion, Approval, Expense, ExpenseCategory, ExpenseRule, JournalEntry, Obligation, OwnerOffset
+from .audit import audit, snap
 from .helpers import ZERO, DomainError, bd, replay, remember, journal, notice, locked_period, period_parties
 from .statements import statement
 
 DEFAULT_CATEGORIES=[('fuel','Fuel / gas'),('toll','Toll / parking'),('maintenance','Routine maintenance'),('repair','Repairs'),('damage','Damage'),('cleaning','Cleaning'),('driver_allowance','Driver allowance'),('other','Miscellaneous')]
 PARTIES=('owner','operator','customer')
 DEFAULT_THRESHOLD=Decimal('5000.00')
+EXP_FIELDS=('public_id','state','amount','category','paid_by','responsible','reference','offset_owner','override_reason','receipt_reference')
 
 def period_terms(period):
     """Terms the period was issued under (falls back to the agreement itself for rows issued before versions existed)."""
@@ -73,8 +75,11 @@ def _prepare(org,p,data,can_override,exclude_pk=None):
             'fuel_responsible':terms.fuel_responsible,'repair_responsible':terms.repair_responsible,'owner_offset_allowed':terms.owner_offset_allowed,'agreement_version':getattr(terms,'number',None)}}
     return fields,resolved,overridden
 
-def _require_proof(fields,resolved):
-    if resolved['proof_required'] and not fields['receipt_reference']:raise DomainError('A receipt reference is required for this category')
+def _require_proof(fields,resolved,expense=None):
+    """Proof is a receipt reference or, once the expense exists, an uploaded document."""
+    if not resolved['proof_required'] or fields['receipt_reference']:return
+    if expense is not None and Document.objects.filter(organization=expense.period.organization,target_type='expense',target_id=str(expense.pk)).exists():return
+    raise DomainError('A receipt is required for this category: upload a document or give a receipt reference')
 
 def _route(expense,user,resolved,overridden):
     """Below threshold (and not an override) posts immediately; otherwise it waits for an approval record."""
@@ -108,6 +113,14 @@ def post_expense_locked(expense,approver=None):
     notice(p.organization,f'expense:{expense.pk}:owner',p.obligations.get(kind=Obligation.Kind.OWNER).party,'expense_posted',{'expense_id':expense.public_id}) if expense.responsible=='owner' else None
     return expense
 
+def _case_for(org,period,data):
+    cid=data.get('maintenance_case_id')
+    if not cid:return None
+    case=MaintenanceCase.objects.get(pk=cid,organization=org)
+    if case.vehicle_id!=period.agreement.vehicle_id:raise DomainError('The maintenance case is for a different vehicle')
+    if case.status not in('approved','in_progress','done'):raise DomainError('Approve the maintenance case before booking cost against it')
+    return case
+
 def _target_period(org,data):
     """The period an entry posts to. A closed period never takes the entry silently: with late_entry=true it goes to the next
     open period of the agreement as a linked adjustment (adjusts_period), otherwise it is refused with instructions."""
@@ -130,9 +143,11 @@ def record_expense(org,user,data,key,can_override=False):
     if adjusts:fields['description']=f"Late entry for {adjusts.month:%Y-%m}: {fields['description']}".strip()
     draft=bool(data.get('draft'))
     if not draft:_require_proof(fields,resolved)
-    expense=Expense.objects.create(period=p,adjusts_period=adjusts,recorded_by=user,state=Expense.State.DRAFT if draft else Expense.State.PENDING,overridden_by=user if overridden else None,**fields)
+    case=_case_for(org,p,data)
+    expense=Expense.objects.create(period=p,adjusts_period=adjusts,maintenance_case=case,recorded_by=user,state=Expense.State.DRAFT if draft else Expense.State.PENDING,overridden_by=user if overridden else None,**fields)
     if not draft:_route(expense,user,resolved,overridden)
     remember(org,'expense',key,data,expense)
+    audit(org,user,'expense.record','expense',expense.pk,after=snap(expense,EXP_FIELDS),reason=expense.override_reason)
     return expense
 
 def _locked_draft(org,expense_id):
@@ -143,35 +158,45 @@ def _locked_draft(org,expense_id):
 @transaction.atomic
 def update_draft(org,user,expense_id,data,can_override=False):
     expense,p=_locked_draft(org,expense_id)
+    before=snap(expense,EXP_FIELDS)
     merged={'amount':expense.amount,'category':expense.category,'responsible':expense.responsible,'paid_by':expense.paid_by,'reference':expense.reference,'event_date':expense.event_date,'offset_owner':expense.offset_owner,'description':expense.description,'receipt_reference':expense.receipt_reference,'override_reason':expense.override_reason,'allow_duplicate_reason':expense.duplicate_reason}
     merged.update({k:v for k,v in data.items() if v is not None and k!='period_id'})
     fields,_,overridden=_prepare(org,p,merged,can_override,exclude_pk=expense.pk)
     for k,v in fields.items():setattr(expense,k,v)
     expense.overridden_by=user if overridden else None
-    expense.save();return expense
+    expense.save()
+    audit(org,user,'expense.update_draft','expense',expense.pk,before=before,after=snap(expense,EXP_FIELDS))
+    return expense
 
 @transaction.atomic
 def submit_expense(org,user,expense_id):
     """draft -> posted (below threshold) or pending approval. Re-validates against the period's rule at submit time."""
     expense,p=_locked_draft(org,expense_id)
+    before=snap(expense,EXP_FIELDS)
     data={'amount':expense.amount,'category':expense.category,'responsible':expense.responsible,'paid_by':expense.paid_by,'reference':expense.reference,'event_date':expense.event_date,'offset_owner':expense.offset_owner,'description':expense.description,'receipt_reference':expense.receipt_reference,'override_reason':expense.override_reason,'allow_duplicate_reason':expense.duplicate_reason}
     fields,resolved,overridden=_prepare(org,p,data,can_override=bool(expense.overridden_by_id),exclude_pk=expense.pk)
-    _require_proof(fields,resolved)
+    _require_proof(fields,resolved,expense)
     for k,v in fields.items():setattr(expense,k,v)
     expense.save()
-    return _route(expense,user,resolved,overridden)
+    routed=_route(expense,user,resolved,overridden)
+    audit(org,user,'expense.submit','expense',routed.pk,before=before,after=snap(routed,EXP_FIELDS))
+    return routed
 
 @transaction.atomic
 def discard_draft(org,user,expense_id):
     expense,_=_locked_draft(org,expense_id)
+    before=snap(expense,EXP_FIELDS);pk=expense.pk
     expense.delete()
+    audit(org,user,'expense.discard','expense',pk,before=before)
 
 @transaction.atomic
 def approve_expense(org,user,expense_id):
     expense=Expense.objects.select_for_update().select_related('period','period__agreement','period__agreement__vehicle__owner').get(pk=expense_id,period__organization=org)
     locked_period(org,expense.period_id)
+    before=snap(expense,EXP_FIELDS)
     posted=post_expense_locked(expense,user)
     Approval.objects.filter(organization=org,subject_type='expense',subject_id=str(expense.pk),decision=Approval.Decision.PENDING).update(decision=Approval.Decision.APPROVED,decided_by=user,decided_at=timezone.now())
+    audit(org,user,'expense.approve','expense',posted.pk,before=before,after=snap(posted,EXP_FIELDS))
     return posted
 
 @transaction.atomic
@@ -181,6 +206,7 @@ def reverse_expense(org,user,expense_id,reason):
     expense=Expense.objects.select_for_update().select_related('period').get(pk=expense_id,period__organization=org)
     locked_period(org,expense.period_id)
     if expense.state!=Expense.State.POSTED:raise DomainError('Only posted expenses can be reversed')
+    before=snap(expense,EXP_FIELDS)
     original=JournalEntry.objects.filter(organization=org,source_type='expense',source_id=str(expense.pk)).first()
     if original:journal(org,'expense_reversal',expense.pk,[(line.account,line.credit,line.debit,line.party,line.period) for line in original.lines.select_related('party','period')])
     expense.state=Expense.State.REVERSED
@@ -188,4 +214,5 @@ def reverse_expense(org,user,expense_id,reason):
     expense.reversed_at=timezone.now()
     expense.reversal_reason=reason.strip()
     expense.save(update_fields=['state','reversed_by','reversed_at','reversal_reason'])
+    audit(org,user,'expense.reverse','expense',expense.pk,before=before,after=snap(expense,EXP_FIELDS),reason=reason)
     return expense

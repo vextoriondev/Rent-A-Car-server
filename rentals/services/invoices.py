@@ -5,6 +5,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.db.models import Q
 from ..models import Allocation, Invoice, InvoiceLine, InvoiceSequence, Obligation, Period
+from .audit import audit
 from .helpers import ZERO, DomainError, replay, remember, total
 
 def _billable(org,period):
@@ -49,6 +50,7 @@ def issue_invoice(org,user,data,key):
     if invoice.due_date<invoice.issue_date:raise DomainError('Due date precedes issue date')
     InvoiceLine.objects.bulk_create([InvoiceLine(invoice=invoice,obligation=available[i],description=available[i].get_kind_display(),amount=available[i].amount) for i in wanted])
     remember(org,'invoice',key,data,invoice)
+    audit(org,user,'invoice.issue','invoice',invoice.pk,after={'number':invoice.number,'amount':amount,'period_id':period.pk,'obligation_ids':wanted})
     return invoice
 
 @transaction.atomic
@@ -58,4 +60,5 @@ def void_invoice(org,user,invoice_id,reason):
     if invoice.state==Invoice.State.VOID:return invoice
     if invoice_summary(invoice)['paid']>0:raise DomainError('Payments are allocated to this invoice; reverse them before voiding')
     invoice.state=Invoice.State.VOID;invoice.void_reason=reason.strip()[:240];invoice.save(update_fields=['state','void_reason'])
+    audit(org,user,'invoice.void','invoice',invoice.pk,before={'state':'issued'},after={'state':'void'},reason=reason)
     return invoice

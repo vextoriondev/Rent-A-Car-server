@@ -1,6 +1,7 @@
 from django.db import transaction
 from ..models import Obligation, Payment, Allocation, OwnerOffset, Expense
 from .statements import statement
+from .audit import audit
 from .helpers import ZERO, DomainError, bd, total, replay, remember, journal, notice
 
 @transaction.atomic
@@ -42,4 +43,5 @@ def record_payment(org,user,data,key):
     journal(org,'payment_advance' if kind=='salary_advance' else 'payment',payment.pk,lines)
     notice(org,f'payment:{payment.pk}',payment.party,'payment_recorded',{'payment_id':payment.public_id})
     remember(org,'payment',key,data,payment)
+    audit(org,user,'payment.record','payment',payment.pk,after={'public_id':payment.public_id,'kind':kind,'amount':amount,'party_id':payment.party_id,'reference':payment.reference,'allocations':[{'obligation_id':r['obligation_id'],'amount':r['amount']} for r in allocations]})
     return payment
