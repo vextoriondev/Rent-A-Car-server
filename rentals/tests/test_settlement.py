@@ -183,7 +183,7 @@ class SettlementApiTests(SettlementBase):
         self.assertEqual(a.post(f'{base}/settlements/{sid}/reopen',{'reason':'fix'},content_type='application/json').json()['state'],'reopened')
         self.assertEqual(c.put(f'{base}/settlement-settings',{'approval_role':'accountant'},content_type='application/json').status_code,403)
         self.assertEqual(a.put(f'{base}/settlement-settings',{'approval_role':'accountant'},content_type='application/json').json()['approval_role'],'accountant')
-        self.assertEqual(c.get(f'{base}/settlements?month=2026-09-01').json()[0]['state'],'reopened')
+        self.assertEqual(c.get(f'{base}/settlements?month=2026-09-01').json()['items'][0]['state'],'reopened')
         self.assertEqual(c.get(f'{base}/settlements/{sid}').json()['version'],2)
         self.assertEqual(c.post(f'{base}/periods/{self.period.pk}/close').json()['closed'],True)         # one-button wrapper still works
         own=get_user_model().objects.create_user('own3',password='x');services.grant_party_access(self.org,self.owner.pk,'own3')

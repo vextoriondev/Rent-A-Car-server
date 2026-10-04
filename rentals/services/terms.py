@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from django.db import transaction
 from django.db.models import Q
 from ..models import Agreement, AgreementVersion, DriverAssignment, Party, Period, Vehicle, VehicleOwnership
+from .audit import audit
 from .helpers import DomainError, bd, validate_agreement
 
 TERM_FIELDS=('customer_rent','owner_rent','driver_salary','fuel_responsible','repair_responsible','owner_offset_allowed','approval_threshold','billing_cadence','payout_cadence')
@@ -65,6 +66,7 @@ def create_agreement(org,user,agreement,reason='Initial terms',draft=False):
     agreement.save()
     ensure_baseline(agreement)
     agreement.versions.update(status='draft' if draft else 'active',created_by=user,reason=reason)
+    audit(org,user,'agreement.create','agreement',agreement.pk,after={'status':agreement.status,'vehicle_id':agreement.vehicle_id,'customer_id':agreement.customer_id,'driver_id':agreement.driver_id,'customer_rent':agreement.customer_rent,'owner_rent':agreement.owner_rent,'driver_salary':agreement.driver_salary})
     return agreement,check_overlaps(agreement)
 
 @transaction.atomic
@@ -74,6 +76,7 @@ def activate_agreement(org,user,agreement_id):
     agreement.status='active';agreement.active=True
     validate_agreement(agreement)
     agreement.save();agreement.versions.filter(status='draft').update(status='active')
+    audit(org,user,'agreement.activate','agreement',agreement.pk,before={'status':'draft'},after={'status':'active'})
     return agreement,check_overlaps(agreement)
 
 def _reject_issued(target,start:date,vehicle=False):
@@ -105,6 +108,7 @@ def revise_agreement(org,user,agreement_id,effective_from:date,changes:dict,reas
     copy_rules(previous,version)
     sync_current_columns(agreement)
     version.refresh_from_db()
+    audit(org,user,'agreement.revise','agreement',agreement.pk,before={f:getattr(previous,f) for f in TERM_FIELDS},after={f:getattr(version,f) for f in TERM_FIELDS}|{'number':version.number,'effective_from':version.effective_from},reason=reason)
     return version
 
 @transaction.atomic
@@ -120,6 +124,7 @@ def assign_driver(org,user,agreement_id,driver_id,effective_from:date,salary_ove
     a=DriverAssignment.objects.create(organization=org,agreement=agreement,driver=driver,effective_from=start,salary_override=salary)
     sync_current_columns(agreement)
     probe=Agreement(pk=agreement.pk,organization=org,driver=driver,start_date=start,end_date=agreement.end_date)
+    audit(org,user,'agreement.assign_driver','agreement',agreement.pk,after={'driver_id':driver.pk,'effective_from':start,'salary_override':salary})
     return a,check_overlaps(probe)
 
 @transaction.atomic
@@ -134,4 +139,5 @@ def transfer_vehicle_ownership(org,user,vehicle_id,owner_id,effective_from:date)
     o=VehicleOwnership.objects.create(organization=org,vehicle=vehicle,owner=owner,effective_from=start)
     current=owner_on(vehicle,date.today())
     if current.pk!=vehicle.owner_id:vehicle.owner=current;vehicle.save(update_fields=['owner'])
+    audit(org,user,'vehicle.transfer_ownership','vehicle',vehicle.pk,after={'owner_id':owner.pk,'effective_from':start})
     return o

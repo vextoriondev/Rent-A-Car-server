@@ -28,6 +28,8 @@ ROLE_ACTIONS: dict[str,set[str]] = {
     'expense.override':FINANCE,'rules.write':FINANCE,'category.write':{'admin'},
     'charge.post':FINANCE,'invoice.issue':FINANCE,'ledger.read':{'admin','accountant','viewer'},
     'settlement.prepare':FINANCE,'settings.write':{'admin'},
+    'maintenance.request':{'admin','accountant','operations','mechanic'},'maintenance.manage':{'admin','accountant','operations'},'maintenance.approve':FINANCE,'maintenance.read':STAFF_ROLES,
+    'audit.read':{'admin','accountant'},'document.upload':{'admin','accountant','operations','mechanic'},'document.read':STAFF_ROLES,'document.delete':{'admin','accountant','operations'},
     'branch.write':{'admin'},'access.manage':{'admin'},
 }
 

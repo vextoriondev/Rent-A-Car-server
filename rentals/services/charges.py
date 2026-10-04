@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from django.db import transaction
 from ..models import Charge, Obligation, Period, IdempotencyRecord
+from .audit import audit
 from .helpers import ZERO, DomainError, bd, replay, remember, journal, period_parties
 from .statements import statement
 
@@ -40,6 +41,7 @@ def _post(org,user,period,side,kind,direction,amount,description='',reference=''
     debit_side=(side=='customer')==(direction=='increase')
     lines=[(account,amount,ZERO,party),(contra,ZERO,amount)] if debit_side else [(contra,amount,ZERO),(account,ZERO,amount,party)]
     journal(org,'carry_out' if kind=='carry_out' else 'charge',charge.pk,lines,period=period)
+    audit(org,user,'charge.post' if kind!='carry_out' else 'period.carry_out','charge',charge.pk,after={'kind':kind,'side':side,'direction':direction,'amount':amount,'period_id':period.pk,'description':description})
     return charge
 
 @transaction.atomic

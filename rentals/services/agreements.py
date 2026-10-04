@@ -1,10 +1,11 @@
 from django.db import transaction
 from ..models import Agreement, Period, Obligation
+from .audit import audit
 from .helpers import ZERO, DomainError, validate_agreement, journal, notice
 from .terms import ensure_baseline, version_for, owner_on, assignment_on
 
 @transaction.atomic
-def issue_period(org,agreement_id,month):
+def issue_period(org,agreement_id,month,user=None):
     """Issue a month under the terms, owner and driver effective for that month; the version is recorded on the period."""
     agreement=Agreement.objects.select_for_update().select_related('vehicle__owner','customer','driver').get(pk=agreement_id,organization=org,active=True)
     if month.day!=1:raise DomainError('Month must be its first day')
@@ -25,4 +26,5 @@ def issue_period(org,agreement_id,month):
         ob=Obligation.objects.create(period=period,kind=kind,party=party,amount=amount)
         journal(org,'obligation',ob.pk,lines,period=period)
     notice(org,f'period:{period.pk}:customer',agreement.customer,'rent_issued',{'period_id':period.pk})
+    audit(org,user,'period.issue','period',period.pk,after={'agreement_id':agreement.pk,'month':month,'version':version.number})
     return period

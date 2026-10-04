@@ -6,7 +6,7 @@ from ninja.errors import HttpError
 from ..models import Party, Vehicle, Agreement, Period
 from .. import policies, services
 from ..models import Agreement as AgreementModel
-from ._shared import AgreementIn, QuickAgreementIn, ReviseIn, AssignDriverIn, TransferOwnerIn, DraftIn, membership, result, agreement_dict, agreement_detail, version_dict, money_dict
+from ._shared import AgreementIn, QuickAgreementIn, ReviseIn, AssignDriverIn, TransferOwnerIn, DraftIn, membership, result, agreement_dict, agreement_detail, version_dict, money_dict, paginate
 
 router = Router()
 
@@ -21,7 +21,7 @@ def create_checked(request,org_id,agreement):
 def agreements(request,org_id:int,limit:int=100,offset:int=0):
     m=membership(request,org_id,'read')
     qs=policies.scope_queryset(request.user,m,Agreement.objects.all()).select_related('vehicle__owner','customer','driver').order_by('-id')
-    return {'count':qs.count(),'items':[policies.redact_agreement(agreement_dict(a),m.role) for a in qs[max(0,offset):max(0,offset)+min(100,max(1,limit))]]}
+    return paginate(qs,limit,offset,lambda a:policies.redact_agreement(agreement_dict(a),m.role))
 
 @router.post('/orgs/{org_id}/agreements')
 def create_agreement(request,org_id:int,payload:AgreementIn):
@@ -50,15 +50,15 @@ def quick_agreement(request,org_id:int,payload:QuickAgreementIn):
 @router.post('/orgs/{org_id}/agreements/{agreement_id}/periods')
 def issue_period(request,org_id:int,agreement_id:int,month:date):
     m=membership(request,org_id,'period.issue')
-    p=result(services.issue_period,m.organization,agreement_id,month)
+    p=result(services.issue_period,m.organization,agreement_id,month,request.user)
     return {'period_id':p.pk,'month':p.month.isoformat(),'obligations':[{'id':o.pk,'kind':o.kind,'party_id':o.party_id,'amount':str(o.amount)} for o in p.obligations.all()]}
 
 @router.get('/orgs/{org_id}/periods')
-def periods(request,org_id:int,month:date|None=None):
+def periods(request,org_id:int,month:date|None=None,limit:int=100,offset:int=0):
     m=membership(request,org_id,'read')
     qs=policies.scope_queryset(request.user,m,Period.objects.all())
     if month:qs=qs.filter(month=month)
-    return [{'id':p.pk,'agreement_id':p.agreement_id,'month':p.month.isoformat(),'closed':bool(p.closed_at)} for p in qs.order_by('-month','agreement_id')[:200]]
+    return paginate(qs.order_by('-month','agreement_id'),limit,offset,lambda p:{'id':p.pk,'agreement_id':p.agreement_id,'month':p.month.isoformat(),'closed':bool(p.closed_at)})
 
 @router.get('/orgs/{org_id}/periods/{period_id}/statement')
 def statement(request,org_id:int,period_id:int):
@@ -78,6 +78,7 @@ def agreement_detail_view(request,org_id:int,agreement_id:int):
     m=membership(request,org_id,'read')
     a=policies.scope_queryset(request.user,m,Agreement.objects.all()).select_related('vehicle__owner','customer','driver').filter(pk=agreement_id).first()
     if not a:raise HttpError(404,'Record not found')
+    services.audit(m.organization,request.user,'sensitive.read','agreement',a.pk)
     if policies.is_actor(m.role):return policies.redact_agreement(agreement_dict(a),m.role)
     return agreement_detail(a)
 

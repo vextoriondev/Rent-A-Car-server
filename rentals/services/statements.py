@@ -11,8 +11,8 @@ BILL={'obligation','charge'}
 PAY={'payment','payment_advance'}
 MARGIN_KINDS={'customer_rent','owner_rent','driver_salary','charge','credit','adjustment'}
 
-def ledger_statement(period):
-    rows=list(JournalLine.objects.filter(period=period).values_list('account','entry__source_type','debit','credit'))
+def _sections(period,rows):
+    """Statement figures from one period's journal rows [(account, source_type, debit, credit)]."""
     def nd(account,sources=None):return sum((d-c for a,s,d,c in rows if a==account and (sources is None or s in sources)),ZERO)
     def nc(account,sources=None):return -nd(account,sources)
     c_billed=nd('CUSTOMER_RECEIVABLE',BILL);c_carried=nc('CUSTOMER_RECEIVABLE',{'carry_out'});c_received=nc('CUSTOMER_RECEIVABLE',{'payment'})
@@ -24,6 +24,15 @@ def ledger_statement(period):
         'owner':{'gross':o_gross,'offsets':o_offsets,'net':o_gross-o_offsets,'paid':o_paid,'carried_forward':o_carried,'due':owner_due,'separate_recoverable':nd('OWNER_RECOVERABLE'),'owner_owes_operator':owner_due<0},
         'driver':{'earned':d_earned,'paid':d_paid,'advance':d_advance,'carried_forward':d_carried,'due':d_earned-d_carried-d_paid},
         'operator':{'accrual_margin':nc('RENT_REVENUE')+nc('OTHER_REVENUE')-nd('OWNER_RENT_EXPENSE')-nd('DRIVER_SALARY_EXPENSE')-nd('OPERATING_EXPENSE'),'recorded_cash_movement':nd('CASH'),'operator_borne_costs':nd('OPERATING_EXPENSE')}}
+
+def ledger_statement(period):
+    return _sections(period,list(JournalLine.objects.filter(period=period).values_list('account','entry__source_type','debit','credit')))
+
+def bulk_ledger_statements(periods):
+    """Statements for many periods with ONE journal query (reports must not run a query per period)."""
+    periods=list(periods);grouped={p.pk:[] for p in periods}
+    for pid,a,s,d,c in JournalLine.objects.filter(period__in=periods).values_list('period_id','account','entry__source_type','debit','credit'):grouped[pid].append((a,s,d,c))
+    return {p.pk:_sections(p,grouped[p.pk]) for p in periods}
 
 def obligation_statement(period):
     """Same figures from obligations, allocations and expenses only (no journal)."""

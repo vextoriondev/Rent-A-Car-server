@@ -34,6 +34,7 @@ class Expense(models.Model):
     public_id = models.CharField(max_length=20,unique=True,default=uid)
     period = models.ForeignKey(Period,on_delete=models.PROTECT,related_name='expenses')
     adjusts_period = models.ForeignKey(Period,null=True,blank=True,on_delete=models.PROTECT,related_name='late_adjustments',help_text='Closed period this late entry belongs to; the expense itself posts in the next open period')
+    maintenance_case = models.ForeignKey('rentals.MaintenanceCase',null=True,blank=True,on_delete=models.PROTECT,related_name='expenses')
     category = models.CharField(max_length=40)
     category_ref = models.ForeignKey(ExpenseCategory,null=True,blank=True,on_delete=models.PROTECT,related_name='expenses')
     amount = models.DecimalField(max_digits=14,decimal_places=2)

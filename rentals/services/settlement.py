@@ -7,6 +7,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 from ..models import Allocation, Charge, Expense, InvoiceLine, Invoice, Obligation, OrgSettings, OwnerOffset, Period, Settlement, SettlementLine
+from .audit import audit
 from .helpers import ZERO, DomainError, fingerprint, notice, period_parties
 from .statements import statement
 
@@ -20,6 +21,7 @@ def get_settings(org):
 
 def update_settings(org,user,*,cutoff_day=None,approval_role=None,negative_owner_blocks_close=None):
     s=get_settings(org)
+    before={'cutoff_day':s.cutoff_day,'approval_role':s.approval_role,'negative_owner_blocks_close':s.negative_owner_blocks_close}
     if cutoff_day is not None:
         if not 1<=cutoff_day<=31:raise DomainError('Cutoff day must be between 1 and 31')
         s.cutoff_day=cutoff_day
@@ -27,7 +29,9 @@ def update_settings(org,user,*,cutoff_day=None,approval_role=None,negative_owner
         if approval_role not in('admin','accountant'):raise DomainError('Approval role must be admin or accountant')
         s.approval_role=approval_role
     if negative_owner_blocks_close is not None:s.negative_owner_blocks_close=negative_owner_blocks_close
-    s.save();return s
+    s.save()
+    audit(org,user,'settings.update','org_settings',s.pk,before=before,after={'cutoff_day':s.cutoff_day,'approval_role':s.approval_role,'negative_owner_blocks_close':s.negative_owner_blocks_close})
+    return s
 
 def exceptions_for(period):
     """Structured readiness exceptions. 'blocking' ones stop approval/close; 'warning' ones are shown but never stop it."""
@@ -94,17 +98,21 @@ def prepare_settlement(org,user,period_id):
     """Create (or return) the draft settlement for a period. Idempotent."""
     period=Period.objects.select_for_update().select_related('agreement').get(pk=period_id,organization=org)
     s,created=Settlement.objects.get_or_create(period=period,defaults={'organization':org,'agreement':period.agreement,'month':period.month,'state':Settlement.State.CLOSED if period.closed_at else Settlement.State.DRAFT,'prepared_by':user,'prepared_at':timezone.now()})
+    if created:audit(org,user,'settlement.prepare','settlement',s.pk,after={'state':s.state,'month':s.month})
     return s
 
 @transaction.atomic
 def request_settlement_approval(org,user,settlement_id):
     s,period=_lock(org,settlement_id)
     if s.state==Settlement.State.CLOSED:raise DomainError('Settlement is already closed')
+    prior_state=s.state
     _blocking(period)
     _freeze(s,period)
     s.state=Settlement.State.PENDING;s.statement_hash=_hash(period);s.prepared_by=user;s.prepared_at=timezone.now()
     s.approved_by=None;s.approved_at=None
-    s.save();return s
+    s.save()
+    audit(org,user,'settlement.request_approval','settlement',s.pk,before={'state':prior_state},after={'state':s.state,'statement_hash':s.statement_hash})
+    return s
 
 @transaction.atomic
 def approve_settlement(org,user,settlement_id,role,*,shortcut=False):
@@ -112,7 +120,9 @@ def approve_settlement(org,user,settlement_id,role,*,shortcut=False):
     if s.state==Settlement.State.APPROVED:return s
     if s.state!=Settlement.State.PENDING:raise DomainError('Request approval first')
     if not shortcut and role not in('admin',get_settings(org).approval_role):raise DomainError('Your role cannot approve settlements for this organization')
-    s.state=Settlement.State.APPROVED;s.approved_by=user;s.approved_at=timezone.now();s.save();return s
+    s.state=Settlement.State.APPROVED;s.approved_by=user;s.approved_at=timezone.now();s.save()
+    audit(org,user,'settlement.approve','settlement',s.pk,before={'state':'pending_approval'},after={'state':'approved','shortcut':shortcut})
+    return s
 
 @transaction.atomic
 def close_settlement(org,user,settlement_id):
@@ -126,6 +136,7 @@ def close_settlement(org,user,settlement_id):
     period.closed_at=now;period.closed_by=user;period.save(update_fields=['closed_at','closed_by'])
     _freeze(s,period)
     s.state=Settlement.State.CLOSED;s.closed_by=user;s.closed_at=now;s.save()
+    audit(org,user,'settlement.close','settlement',s.pk,before={'state':'approved'},after={'state':'closed','version':s.version,'period_id':period.pk})
     suffix='' if s.version==1 else f':v{s.version}'
     parties=period_parties(period)
     for side in('owner','customer','driver'):
@@ -142,7 +153,9 @@ def reopen_settlement(org,user,settlement_id,reason):
     if Charge.objects.filter(period=period,kind='carry_out').exists():raise DomainError('This month balance was already carried forward and cannot be reopened')
     period.closed_at=None;period.closed_by=None;period.save(update_fields=['closed_at','closed_by'])
     s.state=Settlement.State.REOPENED;s.version+=1;s.reopened_by=user;s.reopened_at=timezone.now();s.reopen_reason=reason.strip()[:240]
-    s.approved_by=None;s.approved_at=None;s.statement_hash='';s.save();return s
+    s.approved_by=None;s.approved_at=None;s.statement_hash='';s.save()
+    audit(org,user,'settlement.reopen','settlement',s.pk,before={'state':'closed'},after={'state':'reopened','version':s.version},reason=reason)
+    return s
 
 def close_period(org,user,period_id):
     """The frontend's single-button close: prepare -> request -> approve (shortcut, no role check beyond the caller's close permission) -> close.

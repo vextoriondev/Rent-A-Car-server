@@ -2,7 +2,7 @@ from ninja import Router
 from ninja.errors import HttpError
 from .. import services
 from ..models import Settlement
-from ._shared import ReasonIn, SettingsIn, membership, result, settlement_dict, money_dict
+from ._shared import ReasonIn, SettingsIn, membership, result, settlement_dict, money_dict, paginate
 
 router = Router()
 
@@ -29,11 +29,11 @@ def prepare(request,org_id:int,period_id:int):
     return settlement_dict(result(services.prepare_settlement,m.organization,request.user,period_id))
 
 @router.get('/orgs/{org_id}/settlements')
-def settlements(request,org_id:int,month:str|None=None):
+def settlements(request,org_id:int,month:str|None=None,limit:int=100,offset:int=0):
     m=membership(request,org_id,'read_financial')
     qs=Settlement.objects.filter(organization=m.organization)
     if month:qs=qs.filter(month=month)
-    return [settlement_dict(s) for s in qs.order_by('-month','-id')[:200]]
+    return paginate(qs.order_by('-month','-id'),limit,offset,lambda s:settlement_dict(s))
 
 @router.get('/orgs/{org_id}/settlements/{settlement_id}')
 def settlement(request,org_id:int,settlement_id:int):

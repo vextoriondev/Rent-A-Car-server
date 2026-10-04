@@ -1,3 +1,5 @@
+> **SUPERSEDED 2026-10-04.** The user decided owners, drivers and customers will not have logins. Their pages are viewed by staff instead; see M10 in `BACKEND_MODEL_PLAN.md`. Kept below for reference only; do not implement the login flow described here.
+
 # Actor accounts (owner / driver / customer login) — MVP portal
 
 Trimmed slice of `BACKEND_MODEL_PLAN.md` milestones **M1** ("Identities, actors...") and **M10** ("Actor portal API"), pulled forward ahead of schedule at the user's request. Spans both repos — backend paths below are relative to this repo (`Rent-A-Car-server/`); frontend paths are relative to the sibling repo `Rent-A-Car-client/`.
