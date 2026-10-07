@@ -6,11 +6,13 @@ from django.utils import timezone
 from datetime import timedelta
 from ..models import Document, MaintenanceCase, Period, AgreementVersion, Approval, Expense, ExpenseCategory, ExpenseRule, JournalEntry, Obligation, OwnerOffset
 from .audit import audit, snap
+from .charges import _post as post_charge_line
 from .helpers import ZERO, DomainError, bd, replay, remember, journal, notice, locked_period, period_parties
 from .statements import statement
 
-DEFAULT_CATEGORIES=[('fuel','Fuel / gas'),('toll','Toll / parking'),('maintenance','Routine maintenance'),('repair','Repairs'),('damage','Damage'),('cleaning','Cleaning'),('driver_allowance','Driver allowance'),('other','Miscellaneous')]
-PARTIES=('owner','operator','customer')
+DEFAULT_CATEGORIES=[('fuel','Fuel / gas'),('toll','Toll / parking'),('maintenance','Routine maintenance'),('repair','Repairs'),('damage','Damage'),('cleaning','Cleaning'),('driver_allowance','Driver allowance'),('driver_salary','Driver salary paid directly'),('other','Miscellaneous')]
+PARTIES=('owner','operator','customer','driver')
+RECOVERABLE={'owner':'OWNER_RECOVERABLE','customer':'CUSTOMER_RECOVERABLE','driver':'DRIVER_RECOVERABLE'}
 DEFAULT_THRESHOLD=Decimal('5000.00')
 EXP_FIELDS=('public_id','state','amount','category','paid_by','responsible','reference','offset_owner','override_reason','receipt_reference')
 
@@ -49,8 +51,7 @@ def _prepare(org,p,data,can_override,exclude_pk=None):
     liable=data['responsible']
     if liable not in PARTIES:raise DomainError('Unsupported responsible party')
     paid_by=data['paid_by']
-    if paid_by not in ('operator','owner'):raise DomainError('This slice supports operator or owner funded expenses')
-    if paid_by=='owner' and liable!='owner':raise DomainError('Cross-party owner-funded expenses need a reimbursement workflow')
+    if paid_by not in PARTIES:raise DomainError('Unsupported paying party')
     reference=data['reference'].strip()
     if not reference:raise DomainError('Reference is required')
     resolved=resolve_rule(p,category)
@@ -103,15 +104,36 @@ def post_expense_locked(expense,approver=None):
     expense.state=Expense.State.POSTED
     expense.approved_by=approver
     expense.save(update_fields=['state','approved_by'])
-    if expense.paid_by=='operator':
-        debit_account={'operator':'OPERATING_EXPENSE','owner':'OWNER_RECOVERABLE','customer':'CUSTOMER_RECOVERABLE'}[expense.responsible]
-        parties=period_parties(p)
-        debit_party={'owner':parties['owner'],'customer':parties['customer']}.get(expense.responsible)
+    _book(expense,approver)
+    notice(p.organization,f'expense:{expense.pk}:owner',p.obligations.get(kind=Obligation.Kind.OWNER).party,'expense_posted',{'expense_id':expense.public_id}) if expense.responsible=='owner' else None
+    return expense
+
+def _book(expense,user):
+    """Ledger effect of a posted expense, whoever paid and whoever is responsible.
+    - A party paying its own cost (owner/owner, customer/customer, driver/driver) is a memo only: nothing in the operator's books.
+    - The operator paid: Dr the responsible side (operating expense, or that party's recoverable) / Cr cash.
+    - A third party paid for someone else: Dr the responsible side / Cr the payer's balance (we owe an owner or driver more,
+      a customer owes less), as an `expense_front` obligation so statement and ledger still reconcile."""
+    p,payer,liable=expense.period,expense.paid_by,expense.responsible
+    if payer==liable and payer!='operator':return
+    parties=period_parties(p)
+    debit_account='OPERATING_EXPENSE' if liable=='operator' else RECOVERABLE[liable]
+    debit_party=parties.get(liable)
+    if payer=='operator':
         lines=[(debit_account,expense.amount,ZERO,debit_party),('CASH',ZERO,expense.amount)]
         if expense.offset_owner:lines += [('OWNER_PAYABLE',expense.amount,ZERO,parties['owner']),('OWNER_RECOVERABLE',ZERO,expense.amount,parties['owner'])]
         journal(p.organization,'expense',expense.pk,lines,period=p)
-    notice(p.organization,f'expense:{expense.pk}:owner',p.obligations.get(kind=Obligation.Kind.OWNER).party,'expense_posted',{'expense_id':expense.public_id}) if expense.responsible=='owner' else None
-    return expense
+    else:
+        post_charge_line(p.organization,user or expense.recorded_by,p,payer,'expense_front','decrease' if payer=='customer' else 'increase',expense.amount,f'{expense.public_id} paid by {payer}',expense.reference,source=('expense',str(expense.pk)),contra=debit_account,contra_party=debit_party)
+
+def _unbook(expense,user):
+    from ..models import Charge
+    original=JournalEntry.objects.filter(organization=expense.period.organization,source_type='expense',source_id=str(expense.pk)).first()
+    if original:journal(expense.period.organization,'expense_reversal',expense.pk,[(l.account,l.credit,l.debit,l.party,l.period) for l in original.lines.select_related('party','period')])
+    front=Charge.objects.filter(organization=expense.period.organization,source_type='expense',source_id=str(expense.pk)).select_related('period').first()
+    if front:
+        debit_account='OPERATING_EXPENSE' if expense.responsible=='operator' else RECOVERABLE[expense.responsible]
+        post_charge_line(expense.period.organization,user,front.period,front.side,'expense_front','increase' if front.direction=='decrease' else 'decrease',front.amount,f'Reversal of {expense.public_id}',expense.reference,source=('expense_reversal',str(expense.pk)),contra=debit_account,contra_party=period_parties(front.period).get(expense.responsible))
 
 def _case_for(org,period,data):
     cid=data.get('maintenance_case_id')
@@ -207,8 +229,7 @@ def reverse_expense(org,user,expense_id,reason):
     locked_period(org,expense.period_id)
     if expense.state!=Expense.State.POSTED:raise DomainError('Only posted expenses can be reversed')
     before=snap(expense,EXP_FIELDS)
-    original=JournalEntry.objects.filter(organization=org,source_type='expense',source_id=str(expense.pk)).first()
-    if original:journal(org,'expense_reversal',expense.pk,[(line.account,line.credit,line.debit,line.party,line.period) for line in original.lines.select_related('party','period')])
+    _unbook(expense,user)
     expense.state=Expense.State.REVERSED
     expense.reversed_by=user
     expense.reversed_at=timezone.now()

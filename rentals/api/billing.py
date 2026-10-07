@@ -2,7 +2,7 @@ from datetime import date
 from ninja import Router
 from ninja.errors import HttpError
 from .. import services
-from ..models import Account, Charge, Invoice, Period
+from ..models import Account, Allocation, Charge, Invoice, Obligation, Period
 from ._shared import ChargeIn, InvoiceIn, ReasonIn, membership, result, charge_dict, invoice_dict, money_dict, paginate
 
 router = Router()
@@ -40,6 +40,19 @@ def ledger(request,org_id:int,period_id:int):
     stmt=services.ledger_statement(p)
     return {'statement':money_dict(stmt),'reconciles':not services.diff_statements(stmt,services.obligation_statement(p)),
         'lines':[{'entry_id':l.entry_id,'source_type':l.entry.source_type,'source_id':l.entry.source_id,'account':l.account,'debit':str(l.debit),'credit':str(l.credit),'party_id':l.party_id} for l in lines]}
+
+@router.get('/orgs/{org_id}/periods/{period_id}/obligations')
+def obligations(request,org_id:int,period_id:int,side:str='customer'):
+    """Positive obligations on one side of a period with what is still open on each (amount minus allocated), for payment splitting. Owner offsets are not subtracted here; the payment endpoint still enforces them."""
+    m=membership(request,org_id,'read_financial')
+    if side not in ('customer','owner','driver'):raise HttpError(422,'Unknown side')
+    p=Period.objects.filter(pk=period_id,organization=m.organization).first()
+    if not p:raise HttpError(404,'Period not found')
+    rows=[];notes={c.obligation_id:c.description for c in Charge.objects.filter(period=p).exclude(obligation=None)}
+    for o in Obligation.objects.filter(period=p,party__kind=side).exclude(kind='carry_out').order_by('pk'):
+        paid=services.total(Allocation.objects.filter(obligation=o))
+        if o.amount>0:rows.append({'obligation_id':o.pk,'kind':o.kind,'description':o.get_kind_display()+(f': {notes[o.pk]}' if notes.get(o.pk) else ''),'amount':str(o.amount),'allocated':str(paid),'open_amount':str(max(o.amount-paid,0))})
+    return rows
 
 @router.get('/orgs/{org_id}/periods/{period_id}/invoice-preview')
 def invoice_preview(request,org_id:int,period_id:int):

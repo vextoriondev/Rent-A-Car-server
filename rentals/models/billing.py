@@ -8,7 +8,7 @@ class Charge(models.Model):
     """A variable charge, credit, adjustment, reimbursement or opening/carried balance posted against one side of a period.
     Posting creates one Obligation (signed amount) and one journal entry; charges are never edited."""
     class Kind(models.TextChoices):
-        CHARGE='charge','Charge'; CREDIT='credit','Credit'; ADJUSTMENT='adjustment','Adjustment'; REIMBURSEMENT='reimbursement','Reimbursement'
+        CHARGE='charge','Charge'; CREDIT='credit','Credit'; ADJUSTMENT='adjustment','Adjustment'; REIMBURSEMENT='reimbursement','Reimbursement'; EXPENSE_FRONT='expense_front','Expense paid by a third party'
         OPENING='opening_balance','Opening balance'; CARRY_OUT='carry_out','Carried forward'
     class Direction(models.TextChoices): INCREASE='increase','Increase'; DECREASE='decrease','Decrease'
     organization = models.ForeignKey(Organization,on_delete=models.CASCADE)

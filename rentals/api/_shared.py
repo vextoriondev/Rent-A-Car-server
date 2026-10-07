@@ -14,18 +14,19 @@ class VehicleIn(Schema): registration:str; model_name:str; owner_id:int
 class AgreementIn(Schema):
     vehicle_id:int; customer_id:int; driver_id:int; start_date:date; end_date:date|None=None
     customer_rent:Decimal; owner_rent:Decimal; driver_salary:Decimal
-    fuel_responsible:Literal['owner','operator','customer']='owner'
-    repair_responsible:Literal['owner','operator','customer']='owner'
+    fuel_responsible:Literal['owner','operator','customer','driver']='owner'
+    repair_responsible:Literal['owner','operator','customer','driver']='owner'
     owner_offset_allowed:bool=False
+    driver_provider:Literal['operator','owner','customer']='operator'; driver_paid_by:Literal['operator','owner','customer']='operator'; clauses:str=''
 class ExpenseIn(Schema):
-    period_id:int; category:str; amount:Decimal; event_date:date; paid_by:Literal['operator','owner']; responsible:Literal['owner','operator','customer']; offset_owner:bool=False; reference:str; description:str=''
+    period_id:int; category:str; amount:Decimal; event_date:date; paid_by:Literal['operator','owner','customer','driver']; responsible:Literal['owner','operator','customer','driver']; offset_owner:bool=False; reference:str; description:str=''
     draft:bool=False; receipt_reference:str=''; override_reason:str=''; allow_duplicate_reason:str=''; late_entry:bool=False; maintenance_case_id:int|None=None
 class ExpensePatch(Schema):
-    category:str|None=None; amount:Decimal|None=None; event_date:date|None=None; paid_by:Literal['operator','owner']|None=None; responsible:Literal['owner','operator','customer']|None=None; offset_owner:bool|None=None; reference:str|None=None; description:str|None=None
+    category:str|None=None; amount:Decimal|None=None; event_date:date|None=None; paid_by:Literal['operator','owner','customer','driver']|None=None; responsible:Literal['owner','operator','customer','driver']|None=None; offset_owner:bool|None=None; reference:str|None=None; description:str|None=None
     receipt_reference:str|None=None; override_reason:str|None=None; allow_duplicate_reason:str|None=None
 class CategoryIn(Schema): code:str; name:str
 class RuleIn(Schema):
-    responsible:Literal['owner','operator','customer']; first_payer:Literal['operator','owner']='operator'; reimbursable:bool=True; deductible_from:Literal['owner_payable','none']='none'
+    responsible:Literal['owner','operator','customer','driver']; first_payer:Literal['operator','owner','customer','driver']='operator'; reimbursable:bool=True; deductible_from:Literal['owner_payable','none']='none'
     approval_threshold:Decimal|None=None; proof_required:bool=False; notify_parties:bool=True
 class AllocationIn(Schema): obligation_id:int; amount:Decimal
 class PaymentIn(Schema):
@@ -41,8 +42,9 @@ class ChargeIn(Schema):
 class InvoiceIn(Schema): period_id:int; obligation_ids:list[int]|None=None; issue_date:date|None=None; due_date:date|None=None
 class TermsIn(Schema):
     customer_rent:Decimal|None=None; owner_rent:Decimal|None=None; driver_salary:Decimal|None=None
-    fuel_responsible:Literal['owner','operator','customer']|None=None; repair_responsible:Literal['owner','operator','customer']|None=None
+    fuel_responsible:Literal['owner','operator','customer','driver']|None=None; repair_responsible:Literal['owner','operator','customer','driver']|None=None
     owner_offset_allowed:bool|None=None; approval_threshold:Decimal|None=None
+    driver_provider:Literal['operator','owner','customer']|None=None; driver_paid_by:Literal['operator','owner','customer']|None=None; clauses:str|None=None
 class ReviseIn(Schema): effective_from:date; reason:str; changes:TermsIn
 class AssignDriverIn(Schema): driver_id:int; effective_from:date; salary_override:Decimal|None=None
 class TransferOwnerIn(Schema): owner_id:int; effective_from:date
@@ -60,6 +62,7 @@ class QuickAgreementIn(Schema):
     fuel:Literal['Owner','Operator','Customer']='Owner'
     repair:Literal['Owner','Operator','Customer']='Owner'
     offset:bool=False
+    driver_provider:Literal['operator','owner','customer']='operator'; driver_paid_by:Literal['operator','owner','customer']='operator'; clauses:str=''
 
 def membership(request:HttpRequest,org_id:int,action:str|None=None):
     """The caller's membership in org_id (404 if none, so other organizations stay invisible); `action` is checked against policies."""
@@ -75,7 +78,7 @@ def result(fn,*args,**kwargs):
     except IntegrityError as exc:raise HttpError(409,'Duplicate or conflicting record') from exc
 
 def agreement_dict(a):
-    return {'id':a.pk,'vehicle':{'id':a.vehicle_id,'model_name':a.vehicle.model_name,'registration':a.vehicle.registration},'owner':{'id':a.vehicle.owner_id,'name':a.vehicle.owner.name},'customer':{'id':a.customer_id,'name':a.customer.name},'driver':{'id':a.driver_id,'name':a.driver.name},'start_date':a.start_date.isoformat(),'end_date':a.end_date.isoformat() if a.end_date else None,'customer_rent':str(a.customer_rent),'owner_rent':str(a.owner_rent),'driver_salary':str(a.driver_salary),'fuel_responsible':a.fuel_responsible,'repair_responsible':a.repair_responsible,'owner_offset_allowed':a.owner_offset_allowed}
+    return {'id':a.pk,'vehicle':{'id':a.vehicle_id,'model_name':a.vehicle.model_name,'registration':a.vehicle.registration},'owner':{'id':a.vehicle.owner_id,'name':a.vehicle.owner.name},'customer':{'id':a.customer_id,'name':a.customer.name},'driver':{'id':a.driver_id,'name':a.driver.name},'start_date':a.start_date.isoformat(),'end_date':a.end_date.isoformat() if a.end_date else None,'customer_rent':str(a.customer_rent),'owner_rent':str(a.owner_rent),'driver_salary':str(a.driver_salary),'fuel_responsible':a.fuel_responsible,'repair_responsible':a.repair_responsible,'owner_offset_allowed':a.owner_offset_allowed,'driver_provider':a.driver_provider,'driver_paid_by':a.driver_paid_by,'clauses':a.clauses}
 
 def party_dict(p,sensitive=False):
     data={'id':p.pk,'kind':p.kind,'name':p.name,'phone':p.phone,'email':p.email}
@@ -83,7 +86,7 @@ def party_dict(p,sensitive=False):
     return data
 
 def version_dict(v):
-    return {'id':v.pk,'number':v.number,'effective_from':v.effective_from.isoformat(),'status':v.status,'reason':v.reason,'customer_rent':str(v.customer_rent),'owner_rent':str(v.owner_rent),'driver_salary':str(v.driver_salary),'fuel_responsible':v.fuel_responsible,'repair_responsible':v.repair_responsible,'owner_offset_allowed':v.owner_offset_allowed,'approval_threshold':str(v.approval_threshold),'billing_cadence':v.billing_cadence,'payout_cadence':v.payout_cadence}
+    return {'id':v.pk,'number':v.number,'effective_from':v.effective_from.isoformat(),'status':v.status,'reason':v.reason,'customer_rent':str(v.customer_rent),'owner_rent':str(v.owner_rent),'driver_salary':str(v.driver_salary),'fuel_responsible':v.fuel_responsible,'repair_responsible':v.repair_responsible,'owner_offset_allowed':v.owner_offset_allowed,'approval_threshold':str(v.approval_threshold),'billing_cadence':v.billing_cadence,'payout_cadence':v.payout_cadence,'driver_provider':v.driver_provider,'driver_paid_by':v.driver_paid_by,'clauses':v.clauses}
 
 def rule_dict(r):
     return {'id':r.pk,'category':r.category,'responsible':r.responsible,'first_payer':r.first_payer,'reimbursable':r.reimbursable,'deductible_from':r.deductible_from,'approval_threshold':str(r.approval_threshold) if r.approval_threshold is not None else None,'proof_required':r.proof_required,'notify_parties':r.notify_parties}

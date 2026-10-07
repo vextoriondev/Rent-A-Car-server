@@ -192,7 +192,7 @@ class LedgerApiTests(LedgerBase):
         c=Client();c.force_login(self.user);base=f'/api/v1/orgs/{self.org.pk}'
         r=c.post(f'{base}/charges',{'period_id':self.period.pk,'side':'customer','kind':'charge','amount':'1500','description':'Late return'},content_type='application/json',HTTP_IDEMPOTENCY_KEY='api-c1');self.assertEqual(r.status_code,200,r.content);self.assertEqual(r.json()['direction'],'increase')
         led=c.get(f'{base}/periods/{self.period.pk}/ledger').json();self.assertTrue(led['reconciles']);self.assertEqual(led['statement']['customer']['due'],'101500.00')
-        self.assertEqual(len(c.get(f'{base}/accounts').json()),12)
+        self.assertEqual(len(c.get(f'{base}/accounts').json()),13)
         pre=c.get(f'{base}/periods/{self.period.pk}/invoice-preview').json();self.assertEqual(pre['total'],'101500.00')
         inv=c.post(f'{base}/invoices',{'period_id':self.period.pk},content_type='application/json',HTTP_IDEMPOTENCY_KEY='api-i1').json();self.assertEqual((inv['status'],inv['amount']),('issued','101500.00'))
         self.assertEqual(c.get(f'{base}/invoices/{inv["id"]}').json()['number'],inv['number'])
@@ -216,3 +216,12 @@ class CheckLedgerCommandTests(LedgerBase):
         call_command('check_ledger',stdout=StringIO())
         Obligation.objects.filter(pk=self.ob['owner_rent'].pk).update(amount=D(1))                      # corrupt the obligations side only
         with self.assertRaises(SystemExit):call_command('check_ledger',stdout=StringIO(),stderr=StringIO())
+
+
+class OpenObligationsEndpointTests(LedgerBase):
+    def test_lists_open_amounts_per_customer_obligation(self):
+        self.pay('customer_payment','70000','OB-1');self.charge('customer','charge',2500,key='fee');self.charge('customer','credit',500,key='cr')
+        c=Client();c.force_login(self.user)
+        rows=c.get(f'/api/v1/orgs/{self.org.pk}/periods/{self.period.pk}/obligations').json()
+        self.assertEqual([(r['kind'],r['amount'],r['open_amount']) for r in rows],[('customer_rent','100000.00','30000.00'),('charge','2500.00','2500.00')])   # the credit is negative, so not payable
+        self.assertEqual(c.get(f'/api/v1/orgs/{self.org.pk}/periods/{self.period.pk}/obligations?side=bogus').status_code,422)

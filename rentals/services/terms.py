@@ -3,15 +3,18 @@
 A version/owner/driver change applies to periods starting on/after its effective date (rounded up to a 1st) and is
 rejected once any period in that range has been issued: a current or past month changes only via an explicit adjustment."""
 from datetime import date, timedelta
+from decimal import Decimal
 from django.db import transaction
 from django.db.models import Q
 from ..models import Agreement, AgreementVersion, DriverAssignment, Party, Period, Vehicle, VehicleOwnership
 from .audit import audit
 from .helpers import DomainError, bd, validate_agreement
 
-TERM_FIELDS=('customer_rent','owner_rent','driver_salary','fuel_responsible','repair_responsible','owner_offset_allowed','approval_threshold','billing_cadence','payout_cadence')
+TERM_FIELDS=('customer_rent','owner_rent','driver_salary','fuel_responsible','repair_responsible','owner_offset_allowed','approval_threshold','billing_cadence','payout_cadence','driver_provider','driver_paid_by','clauses')
 MONEY_FIELDS=('customer_rent','owner_rent','driver_salary','approval_threshold')
-MIRROR=('customer_rent','owner_rent','driver_salary','fuel_responsible','repair_responsible','owner_offset_allowed')
+MIRROR=('customer_rent','owner_rent','driver_salary','fuel_responsible','repair_responsible','owner_offset_allowed','driver_provider','driver_paid_by','clauses')
+RESPONSIBLE=('owner','operator','customer','driver')
+DRIVER_ROLES=('operator','owner','customer')
 
 def first_of_month_on_or_after(d:date) -> date:
     return d if d.day==1 else (d.replace(day=1)+timedelta(days=32)).replace(day=1)
@@ -19,14 +22,15 @@ def first_of_month_on_or_after(d:date) -> date:
 def ensure_baseline(agreement):
     """Idempotently create v1 / ownership / driver assignment for agreements saved without them (fixtures, legacy rows)."""
     if not agreement.versions.exists():
-        AgreementVersion.objects.create(agreement=agreement,number=1,effective_from=agreement.start_date,customer_rent=agreement.customer_rent,owner_rent=agreement.owner_rent,driver_salary=agreement.driver_salary,fuel_responsible=agreement.fuel_responsible,repair_responsible=agreement.repair_responsible,owner_offset_allowed=agreement.owner_offset_allowed,reason='Initial terms')
+        AgreementVersion.objects.create(agreement=agreement,number=1,effective_from=agreement.start_date,customer_rent=agreement.customer_rent,owner_rent=agreement.owner_rent,driver_salary=agreement.driver_salary,fuel_responsible=agreement.fuel_responsible,repair_responsible=agreement.repair_responsible,owner_offset_allowed=agreement.owner_offset_allowed,driver_provider=agreement.driver_provider,driver_paid_by=agreement.driver_paid_by,clauses=agreement.clauses,reason='Initial terms')
     if not VehicleOwnership.objects.filter(vehicle=agreement.vehicle).exists():
         VehicleOwnership.objects.create(organization=agreement.organization,vehicle=agreement.vehicle,owner=agreement.vehicle.owner,effective_from=agreement.start_date)
     if not agreement.driver_assignments.exists():
         DriverAssignment.objects.create(organization=agreement.organization,agreement=agreement,driver=agreement.driver,effective_from=agreement.start_date)
 
 def version_for(agreement,month:date):
-    v=agreement.versions.exclude(status='draft').filter(effective_from__lte=month).order_by('-effective_from','-number').first()
+    """Terms for a month: the latest version effective by the end of that month, so an agreement that starts mid-month (its v1 is dated the start day) still has terms for its first month. Revisions always start on the 1st."""
+    v=agreement.versions.exclude(status='draft').filter(effective_from__lt=first_of_month_on_or_after(month+timedelta(days=1))).order_by('-effective_from','-number').first()
     if not v:raise DomainError('No active agreement terms for this month')
     return v
 
@@ -98,8 +102,10 @@ def revise_agreement(org,user,agreement_id,effective_from:date,changes:dict,reas
     previous=live.filter(effective_from__lte=start).order_by('-effective_from','-number').first() or live.order_by('-number').first()
     values={f:getattr(previous,f) for f in TERM_FIELDS}
     for f,v in changes.items():
-        if v is not None:values[f]=bd(v) if f in MONEY_FIELDS else v
-    if values['fuel_responsible'] not in('owner','operator','customer') or values['repair_responsible'] not in('owner','operator','customer'):raise DomainError('Unsupported responsible party')
+        if v is not None:values[f]=(Decimal('0.00') if f=='driver_salary' and Decimal(str(v))==0 else bd(v)) if f in MONEY_FIELDS else v
+    if values['fuel_responsible'] not in RESPONSIBLE or values['repair_responsible'] not in RESPONSIBLE:raise DomainError('Unsupported responsible party')
+    if values['driver_provider'] not in DRIVER_ROLES or values['driver_paid_by'] not in DRIVER_ROLES:raise DomainError('The driver provider and the party paying the driver must each be operator, owner or customer')
+    if values['driver_paid_by']=='operator' and values['driver_salary']<=0:raise DomainError('A driver paid by the operator needs a salary above zero')
     if live.filter(effective_from=start).exists():raise DomainError('A version already starts on that date')
     number=(agreement.versions.order_by('-number').values_list('number',flat=True).first() or 0)+1
     live.filter(effective_from__lt=start).update(status='superseded')

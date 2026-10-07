@@ -131,6 +131,17 @@ class OtherReportTests(ReportBase):
         types=[x[3] for x in r['rows']];self.assertEqual(sorted(set(types)),['Customer payment','Driver payout','Expense','Owner payout']);self.assertEqual(r['count'],4)
         exp=next(x for x in r['rows'] if x[3]=='Expense');self.assertEqual((exp[4],exp[5],exp[6],exp[7],exp[8]),('8000.00','Operator','Owner','Posted','GAR-0182'))
 
+    def test_csv_neutralizes_cells_excel_would_run_as_formulas(self):
+        from ..models import Expense
+        from ..services.reports import excel_safe
+        formula='=HYPERLINK("http://x","click")'
+        Expense.objects.filter(reference='GAR-0182').update(reference=formula)
+        body=self.c.get(f'{self.base}/reports/entries/export').content.decode()
+        self.assertTrue(body.startswith('﻿'))
+        refs={r[8] for r in csv.reader(io.StringIO(body.lstrip('﻿'))) if len(r)==9}
+        self.assertIn("'"+formula,refs);self.assertNotIn(formula,refs)
+        self.assertEqual([excel_safe(x) for x in ['+88017','@a','-x','-1500.00','-.5','12','',-5,'	z']],["'+88017","'@a","'-x",'-1500.00','-.5','12','',-5,"'	z"])
+
     def test_unknown_report_and_isolation(self):
         self.assertEqual(self.c.get(f'{self.base}/reports/nope').status_code,422)
         other=Organization.objects.create(name='Other');U=get_user_model().objects.create_user('rep9',password='x');Membership.objects.create(organization=other,user=U,role='admin')

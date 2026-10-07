@@ -17,7 +17,7 @@ class ExpenseRuleTests(RentalsTestCase):
 
     def test_default_categories_seeded(self):
         services.ensure_categories(self.org)
-        self.assertEqual(self.org.expense_categories.count(),8)
+        self.assertEqual(self.org.expense_categories.count(),9)
         with self.assertRaises(services.DomainError):self.rec(category='bribe')
 
     def october(self,rules=(),changes=None):
@@ -128,4 +128,4 @@ class ExpenseRuleApiTests(RentalsTestCase):
         denied=oc.post(f'{base}/expenses',{**body,'draft':False,'reference':'API-4','amount':'12','responsible':'customer','override_reason':'x'},content_type='application/json',HTTP_IDEMPOTENCY_KEY='api4');self.assertEqual(denied.status_code,422)
         self.assertEqual(oc.put(f'{base}/agreement-versions/{self.agreement.versions.get().pk}/rules/toll',{'responsible':'customer'},content_type='application/json').status_code,403)
         self.assertEqual(oc.post(f'{base}/expense-categories',{'code':'x','name':'X'},content_type='application/json').status_code,403)
-        cats=c.get(f'{base}/expense-categories').json();self.assertEqual(len(cats),8)
+        cats=c.get(f'{base}/expense-categories').json();self.assertEqual(len(cats),9)
