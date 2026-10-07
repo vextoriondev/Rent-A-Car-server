@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 from django.db import transaction
 from django.db.models import Q
 from ninja import Router
@@ -43,7 +44,7 @@ def quick_agreement(request,org_id:int,payload:QuickAgreementIn):
         customer=Party.objects.create(organization_id=org_id,kind='customer',name=payload.customer.strip())
         driver=Party.objects.create(organization_id=org_id,kind='driver',name=payload.driver.strip())
         vehicle=Vehicle.objects.create(organization_id=org_id,registration=payload.registration.strip(),model_name=payload.vehicle.strip(),owner=owner)
-        a=Agreement(organization_id=org_id,vehicle=vehicle,customer=customer,driver=driver,start_date=payload.start,customer_rent=result(services.bd,payload.rent),owner_rent=result(services.bd,payload.owner_rent),driver_salary=result(services.bd,payload.salary),fuel_responsible=payload.fuel.lower(),repair_responsible=payload.repair.lower(),owner_offset_allowed=payload.offset)
+        a=Agreement(organization_id=org_id,vehicle=vehicle,customer=customer,driver=driver,start_date=payload.start,customer_rent=result(services.bd,payload.rent),owner_rent=result(services.bd,payload.owner_rent),driver_salary=Decimal('0.00') if payload.salary==0 else result(services.bd,payload.salary),fuel_responsible=payload.fuel.lower(),repair_responsible=payload.repair.lower(),owner_offset_allowed=payload.offset,driver_provider=payload.driver_provider,driver_paid_by=payload.driver_paid_by,clauses=payload.clauses.strip())
         a,warnings=create_checked(request,org_id,a)
     return {**agreement_dict(Agreement.objects.select_related('vehicle__owner','customer','driver').get(pk=a.pk)),'warnings':warnings}
 

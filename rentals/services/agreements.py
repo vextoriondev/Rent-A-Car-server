@@ -17,14 +17,14 @@ def issue_period(org,agreement_id,month,user=None):
     version=version_for(agreement,month)
     owner=owner_on(agreement.vehicle,month)
     assignment=assignment_on(agreement,month)
-    salary=assignment.salary_override or version.driver_salary
+    salary=(assignment.salary_override or version.driver_salary) if version.driver_paid_by=='operator' else ZERO  # owner/customer-paid drivers: the obligation row keeps the party, no payable is booked
     period=Period.objects.create(organization=org,agreement=agreement,month=month,agreement_version=version)
     for kind,party,amount,lines in [
         (Obligation.Kind.CUSTOMER,agreement.customer,version.customer_rent,[('CUSTOMER_RECEIVABLE',version.customer_rent,ZERO,agreement.customer),('RENT_REVENUE',ZERO,version.customer_rent)]),
         (Obligation.Kind.OWNER,owner,version.owner_rent,[('OWNER_RENT_EXPENSE',version.owner_rent,ZERO),('OWNER_PAYABLE',ZERO,version.owner_rent,owner)]),
         (Obligation.Kind.DRIVER,assignment.driver,salary,[('DRIVER_SALARY_EXPENSE',salary,ZERO),('DRIVER_PAYABLE',ZERO,salary,assignment.driver)])]:
         ob=Obligation.objects.create(period=period,kind=kind,party=party,amount=amount)
-        journal(org,'obligation',ob.pk,lines,period=period)
+        if amount>0:journal(org,'obligation',ob.pk,lines,period=period)
     notice(org,f'period:{period.pk}:customer',agreement.customer,'rent_issued',{'period_id':period.pk})
     audit(org,user,'period.issue','period',period.pk,after={'agreement_id':agreement.pk,'month':month,'version':version.number})
     return period

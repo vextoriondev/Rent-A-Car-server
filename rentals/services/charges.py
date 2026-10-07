@@ -12,7 +12,7 @@ from .helpers import ZERO, DomainError, bd, replay, remember, journal, period_pa
 from .statements import statement
 
 SIDES=('customer','owner','driver')
-KINDS={'charge':{'increase'},'credit':{'decrease'},'adjustment':{'increase','decrease'},'reimbursement':{'increase','decrease'},'opening_balance':{'increase','decrease'},'carry_out':{'increase','decrease'}}
+KINDS={'charge':{'increase'},'credit':{'decrease'},'adjustment':{'increase','decrease'},'reimbursement':{'increase','decrease'},'expense_front':{'increase','decrease'},'opening_balance':{'increase','decrease'},'carry_out':{'increase','decrease'}}
 CONTRA={'charge':'OTHER_REVENUE','credit':'OTHER_REVENUE','adjustment':'OTHER_REVENUE','opening_balance':'OPENING_BALANCE','carry_out':'OPENING_BALANCE'}
 OWNER_DRIVER_CONTRA={'owner':'OWNER_RENT_EXPENSE','driver':'DRIVER_SALARY_EXPENSE'}
 SIDE_ACCOUNT={'customer':'CUSTOMER_RECEIVABLE','owner':'OWNER_PAYABLE','driver':'DRIVER_PAYABLE'}
@@ -21,15 +21,17 @@ def _contra(kind,side,direction):
     if kind=='reimbursement':
         if side=='customer' and direction=='increase':return 'CUSTOMER_RECOVERABLE'
         if side=='owner' and direction=='decrease':return 'OWNER_RECOVERABLE'
-        raise DomainError('Reimbursements bill a customer (increase) or reduce an owner payable (decrease); driver recoveries arrive with the payments milestone')
+        if side=='driver' and direction=='decrease':return 'DRIVER_RECOVERABLE'
+        raise DomainError('Reimbursements bill a customer (increase) or reduce an owner or driver payable (decrease)')
     if kind in('opening_balance','carry_out'):return 'OPENING_BALANCE'
     return CONTRA[kind] if side=='customer' else OWNER_DRIVER_CONTRA[side]
 
-def _post(org,user,period,side,kind,direction,amount,description='',reference='',source=('','')):
+def _post(org,user,period,side,kind,direction,amount,description='',reference='',source=('',''),contra=None,contra_party=None):
+    """`contra`/`contra_party` let an expense paid by a third party choose the other side of the entry (the responsible party's account)."""
     parties=period_parties(period)
     party=parties[side]
     if kind not in KINDS or direction not in KINDS[kind]:raise DomainError(f'A {kind} cannot be an {direction}')
-    contra=_contra(kind,side,direction)
+    contra=contra or _contra(kind,side,direction)
     if kind=='reimbursement':
         stmt=statement(period)[side]
         if amount>stmt['separate_recoverable']:raise DomainError('Reimbursement exceeds the recoverable balance')
@@ -39,7 +41,7 @@ def _post(org,user,period,side,kind,direction,amount,description='',reference=''
     charge.obligation=ob;charge.save(update_fields=['obligation'])
     account=SIDE_ACCOUNT[side]
     debit_side=(side=='customer')==(direction=='increase')
-    lines=[(account,amount,ZERO,party),(contra,ZERO,amount)] if debit_side else [(contra,amount,ZERO),(account,ZERO,amount,party)]
+    lines=[(account,amount,ZERO,party),(contra,ZERO,amount,contra_party)] if debit_side else [(contra,amount,ZERO,contra_party),(account,ZERO,amount,party)]
     journal(org,'carry_out' if kind=='carry_out' else 'charge',charge.pk,lines,period=period)
     audit(org,user,'charge.post' if kind!='carry_out' else 'period.carry_out','charge',charge.pk,after={'kind':kind,'side':side,'direction':direction,'amount':amount,'period_id':period.pk,'description':description})
     return charge

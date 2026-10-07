@@ -22,7 +22,7 @@ def _sections(period,rows):
     return {'period_id':period.pk,'month':period.month.isoformat(),'closed':bool(period.closed_at),
         'customer':{'billed':c_billed,'received':c_received,'carried_forward':c_carried,'due':c_billed-c_carried-c_received,'separate_recoverable':nd('CUSTOMER_RECOVERABLE')},
         'owner':{'gross':o_gross,'offsets':o_offsets,'net':o_gross-o_offsets,'paid':o_paid,'carried_forward':o_carried,'due':owner_due,'separate_recoverable':nd('OWNER_RECOVERABLE'),'owner_owes_operator':owner_due<0},
-        'driver':{'earned':d_earned,'paid':d_paid,'advance':d_advance,'carried_forward':d_carried,'due':d_earned-d_carried-d_paid},
+        'driver':{'earned':d_earned,'paid':d_paid,'advance':d_advance,'carried_forward':d_carried,'due':d_earned-d_carried-d_paid,'separate_recoverable':nd('DRIVER_RECOVERABLE')},
         'operator':{'accrual_margin':nc('RENT_REVENUE')+nc('OTHER_REVENUE')-nd('OWNER_RENT_EXPENSE')-nd('DRIVER_SALARY_EXPENSE')-nd('OPERATING_EXPENSE'),'recorded_cash_movement':nd('CASH'),'operator_borne_costs':nd('OPERATING_EXPENSE')}}
 
 def ledger_statement(period):
@@ -45,17 +45,18 @@ def obligation_statement(period):
     carried=lambda items:-amount(items,lambda o:o.kind=='carry_out')
     margin=lambda items:amount(items,lambda o:o.kind in MARGIN_KINDS)
     posted=Expense.objects.filter(period=period,state=Expense.State.POSTED)
-    operator_cost=total(posted.filter(responsible='operator',paid_by='operator'))
+    operator_cost=total(posted.filter(responsible='operator'))  # the operator's own cost, whoever fronted the money
     operator_paid=total(posted.filter(paid_by='operator'))
     offsets=total(OwnerOffset.objects.filter(obligation__in=own,expense__state=Expense.State.POSTED))
-    owner_recoverable=total(posted.filter(paid_by='operator',responsible='owner',offset_owner=False))+amount(own,lambda o:o.kind=='reimbursement')
-    customer_recoverable=total(posted.filter(paid_by='operator',responsible='customer'))-amount(cust,lambda o:o.kind=='reimbursement')
+    owner_recoverable=total(posted.filter(responsible='owner',offset_owner=False).exclude(paid_by='owner'))+amount(own,lambda o:o.kind=='reimbursement')
+    customer_recoverable=total(posted.filter(responsible='customer').exclude(paid_by='customer'))-amount(cust,lambda o:o.kind=='reimbursement')
+    driver_recoverable=total(posted.filter(responsible='driver').exclude(paid_by='driver'))+amount(drv,lambda o:o.kind=='reimbursement')
     c_recv,o_paid,d_paid=received(cust),received(own),received(drv)
     owner_due=billed(own)-offsets-carried(own)-o_paid
     return {'period_id':period.pk,'month':period.month.isoformat(),'closed':bool(period.closed_at),
         'customer':{'billed':billed(cust),'received':c_recv,'carried_forward':carried(cust),'due':billed(cust)-carried(cust)-c_recv,'separate_recoverable':customer_recoverable},
         'owner':{'gross':billed(own),'offsets':offsets,'net':billed(own)-offsets,'paid':o_paid,'carried_forward':carried(own),'due':owner_due,'separate_recoverable':owner_recoverable,'owner_owes_operator':owner_due<0},
-        'driver':{'earned':billed(drv),'paid':d_paid,'advance':total(Allocation.objects.filter(obligation__in=drv,payment__kind=Payment.Kind.ADVANCE)),'carried_forward':carried(drv),'due':billed(drv)-carried(drv)-d_paid},
+        'driver':{'earned':billed(drv),'paid':d_paid,'advance':total(Allocation.objects.filter(obligation__in=drv,payment__kind=Payment.Kind.ADVANCE)),'carried_forward':carried(drv),'due':billed(drv)-carried(drv)-d_paid,'separate_recoverable':driver_recoverable},
         'operator':{'accrual_margin':margin(cust)-margin(own)-margin(drv)-operator_cost,'recorded_cash_movement':c_recv-o_paid-d_paid-operator_paid,'operator_borne_costs':operator_cost}}
 
 def statement(period):

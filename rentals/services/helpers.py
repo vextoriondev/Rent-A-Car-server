@@ -35,7 +35,7 @@ def remember(org,action,key,data,obj):
 
 CHART=[('CASH','Cash and bank','asset',''),('CUSTOMER_RECEIVABLE','Customer receivable','asset','customer'),('RENT_REVENUE','Rent revenue','revenue',''),('OTHER_REVENUE','Other revenue','revenue',''),
     ('OWNER_RENT_EXPENSE','Owner rent expense','expense',''),('OWNER_PAYABLE','Owner payable','liability','owner'),('DRIVER_SALARY_EXPENSE','Driver salary expense','expense',''),('DRIVER_PAYABLE','Driver payable','liability','driver'),
-    ('OPERATING_EXPENSE','Operating expense','expense',''),('OWNER_RECOVERABLE','Owner recoverable','asset','owner'),('CUSTOMER_RECOVERABLE','Customer recoverable','asset','customer'),('OPENING_BALANCE','Opening balance equity','equity','')]
+    ('OPERATING_EXPENSE','Operating expense','expense',''),('OWNER_RECOVERABLE','Owner recoverable','asset','owner'),('CUSTOMER_RECOVERABLE','Customer recoverable','asset','customer'),('OPENING_BALANCE','Opening balance equity','equity',''),('DRIVER_RECOVERABLE','Driver recoverable','asset','driver')]
 
 def ensure_accounts(org):
     found={a.code:a for a in Account.objects.filter(organization=org)}
@@ -75,7 +75,8 @@ def validate_agreement(agreement):
     clash=Agreement.objects.filter(vehicle_id=agreement.vehicle_id,active=True).exclude(pk=agreement.pk).filter(Q(end_date__isnull=True)|Q(end_date__gte=agreement.start_date))
     if agreement.end_date:clash=clash.filter(start_date__lte=agreement.end_date)
     if clash.exists():raise DomainError('Vehicle has an overlapping active agreement')
-    if any(x<=0 for x in [agreement.customer_rent,agreement.owner_rent,agreement.driver_salary]):raise DomainError('Monthly terms must be positive')
+    if agreement.driver_provider not in('operator','owner','customer') or agreement.driver_paid_by not in('operator','owner','customer'):raise DomainError('The driver provider and the party paying the driver must each be operator, owner or customer')
+    if any(x<=0 for x in [agreement.customer_rent,agreement.owner_rent]) or agreement.driver_salary<0 or (agreement.driver_paid_by=='operator' and agreement.driver_salary<=0):raise DomainError('Monthly terms must be positive')
 
 def locked_period(org,period_id):
     period=Period.objects.select_for_update().select_related('agreement','agreement__vehicle','agreement__customer','agreement__driver','agreement__vehicle__owner').get(pk=period_id,organization=org)

@@ -2,6 +2,7 @@
 reports reconcile to statements by construction. Query counts are constant in the number of periods (asserted in tests)."""
 import csv
 import io
+import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from django.db.models import CharField, Count, Exists, OuterRef, Sum
@@ -128,6 +129,12 @@ def _entries(org,f,limit,offset):
     page,nxt=_page(flat,limit,offset)
     return {'report':'entries','title':OTHER_REPORTS['entries'],'columns':['ID','Agreement','Date','Type','Amount BDT','Paid by','Responsible','Status','Reference'],'rows':page,'totals':{},'count':len(flat),'next':nxt,'filters':f}
 
+_FORMULA=re.compile(r'^(?:[=+@\t\r]|-(?![\d.]))')
+
+def excel_safe(cell):
+    """Excel runs a text cell that starts with = + @ (or - not followed by a digit) as a formula, so a typed reference such as =HYPERLINK(...) could execute when the file is opened. A leading apostrophe-free fix is a single quote prefix; numbers like -1500.00 are left alone."""
+    return "'"+cell if isinstance(cell,str) and _FORMULA.match(cell) else cell
+
 def report_csv(org,rtype,filters=None,as_of=None):
     """CSV text: report name, generated_at and the applied filters first, then the table. Exports ignore pagination (all rows)."""
     data=run_report(org,rtype,filters,limit=None,as_of=as_of)
@@ -136,5 +143,5 @@ def report_csv(org,rtype,filters=None,as_of=None):
     w.writerow(['Report',data['title']]);w.writerow(['Generated at',now])
     w.writerow(['Filters','; '.join(f'{k}={v}' for k,v in sorted(data['filters'].items())) or 'none']);w.writerow([])
     w.writerow(data['columns']+(['Generated at'] if rtype in PERIOD_REPORTS else []))
-    for r in data['rows']:w.writerow(r+([now] if rtype in PERIOD_REPORTS else []))
+    for r in data['rows']:w.writerow([excel_safe(c) for c in r]+([now] if rtype in PERIOD_REPORTS else []))
     return '﻿'+buf.getvalue()

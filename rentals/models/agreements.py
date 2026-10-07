@@ -13,9 +13,12 @@ class Agreement(models.Model):
     customer_rent = models.DecimalField(max_digits=14,decimal_places=2)
     owner_rent = models.DecimalField(max_digits=14,decimal_places=2)
     driver_salary = models.DecimalField(max_digits=14,decimal_places=2)
-    fuel_responsible = models.CharField(max_length=12,choices=[('owner','Owner'),('customer','Customer'),('operator','Operator')],default='owner')
-    repair_responsible = models.CharField(max_length=12,choices=[('owner','Owner'),('customer','Customer'),('operator','Operator')],default='owner')
+    fuel_responsible = models.CharField(max_length=12,choices=[('owner','Owner'),('customer','Customer'),('operator','Operator'),('driver','Driver')],default='owner')
+    repair_responsible = models.CharField(max_length=12,choices=[('owner','Owner'),('customer','Customer'),('operator','Operator'),('driver','Driver')],default='owner')
     owner_offset_allowed = models.BooleanField(default=False)
+    driver_provider = models.CharField(max_length=10,default='operator')  # who supplies the driver: operator | owner | customer
+    driver_paid_by = models.CharField(max_length=10,default='operator')  # who pays the driver's salary; only 'operator' creates a payable
+    clauses = models.TextField(blank=True)  # free-text agreement clauses agreed with the customer
     status = models.CharField(max_length=10,choices=[('draft','Draft'),('active','Active'),('ended','Ended')],default='active')
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -33,7 +36,7 @@ class Period(models.Model):
 class Obligation(models.Model):
     class Kind(models.TextChoices):
         CUSTOMER='customer_rent','Customer rent'; OWNER='owner_rent','Owner rent'; DRIVER='driver_salary','Driver salary'
-        CHARGE='charge','Charge'; CREDIT='credit','Credit'; ADJUSTMENT='adjustment','Adjustment'; REIMBURSEMENT='reimbursement','Reimbursement'
+        CHARGE='charge','Charge'; CREDIT='credit','Credit'; ADJUSTMENT='adjustment','Adjustment'; REIMBURSEMENT='reimbursement','Reimbursement'; EXPENSE_FRONT='expense_front','Expense paid by a third party'
         OPENING='opening_balance','Opening balance'; CARRY_OUT='carry_out','Carried forward'
     period = models.ForeignKey(Period,on_delete=models.PROTECT,related_name='obligations')
     kind = models.CharField(max_length=20,choices=Kind.choices)
