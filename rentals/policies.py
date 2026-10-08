@@ -42,13 +42,45 @@ def actor_party_ids(user,org_id) -> set[int]:
     from .models import PartyUser
     return set(PartyUser.objects.filter(organization_id=org_id,user=user,active=True).values_list('party_id',flat=True))
 
-def scope_queryset(user,member,qs):
-    """Restrict qs to what `member` may see. Org-wide staff: the organization. Actors: only their own parties,
+def limited_branch(member):
+    """The branch a member is confined to, or None. Admins and members without a branch see every branch."""
+    return member.branch_id if member.branch_id and member.role!='admin' else None
+
+def effective_branch(member,requested=None):
+    """A branch-limited member is forced to their own branch whatever they ask for; everyone else may optionally look at one branch."""
+    return limited_branch(member) or requested
+
+def _branch_paths():
+    from .models import Vehicle, Agreement, AgreementVersion, Period, Obligation, Expense, Charge, Invoice, Settlement, MaintenanceCase
+    return {Vehicle:'branch',Agreement:'branch',AgreementVersion:'agreement__branch',Period:'agreement__branch',Obligation:'period__agreement__branch',Expense:'period__agreement__branch',
+        Charge:'agreement__branch',Invoice:'period__agreement__branch',Settlement:'agreement__branch',MaintenanceCase:'vehicle__branch'}
+
+def branch_parties(user_id,branch_id):
+    """Parties a branch may see: those on its agreements or vehicles, plus unlinked ones the user created (so a new party can be picked before its first agreement)."""
+    from .models import Party, Vehicle, Agreement
+    linked=Q(pk__in=Agreement.objects.filter(branch_id=branch_id).values('customer_id'))|Q(pk__in=Agreement.objects.filter(branch_id=branch_id).values('driver_id'))|Q(pk__in=Vehicle.objects.filter(branch_id=branch_id).values('owner_id'))
+    anywhere=Q(pk__in=Agreement.objects.values('customer_id'))|Q(pk__in=Agreement.objects.values('driver_id'))|Q(pk__in=Vehicle.objects.values('owner_id'))
+    return Party.objects.filter(linked|(Q(created_by_id=user_id)&~anywhere)).values('pk')
+
+def branch_scope(member,qs,branch_id=None):
+    """Narrow qs to one branch: always for a branch-limited member, on request for an admin. Models without a branch are returned unchanged."""
+    from .models import Party, Payment, Allocation, NotificationOutbox
+    branch=effective_branch(member,branch_id)
+    if not branch:return qs
+    model=qs.model
+    if model is Party:return qs.filter(pk__in=branch_parties(member.user_id,branch))
+    if model is Payment:return qs.filter(pk__in=Allocation.objects.filter(obligation__period__agreement__branch_id=branch).values('payment_id'))
+    if model is NotificationOutbox:return qs.filter(recipient_id__in=branch_parties(member.user_id,branch))
+    path=_branch_paths().get(model)
+    return qs.filter(**{path:branch}) if path else qs
+
+def scope_queryset(user,member,qs,branch_id=None):
+    """Restrict qs to what `member` may see. Org-wide staff: the organization, narrowed to their branch when they have one (`branch_id` lets an admin look at one branch). Actors: only their own parties,
     vehicles, agreements, periods and notices. Mechanics see vehicles only."""
     from .models import Party, Vehicle, Agreement, Period, NotificationOutbox
     model=qs.model;org=member.organization_id;role=member.role
-    if role in ORG_WIDE_ROLES:return qs.filter(organization_id=org)
-    if role=='mechanic':return qs.filter(organization_id=org) if model is Vehicle else qs.none()
+    if role in ORG_WIDE_ROLES:return branch_scope(member,qs.filter(organization_id=org),branch_id)
+    if role=='mechanic':return branch_scope(member,qs.filter(organization_id=org)) if model is Vehicle else qs.none()
     if role not in ACTOR_ROLES:return qs.none()
     parties=actor_party_ids(user,org)
     link={'owner':Q(vehicle__owner_id__in=parties),'driver':Q(driver_id__in=parties),'customer':Q(customer_id__in=parties)}[role]

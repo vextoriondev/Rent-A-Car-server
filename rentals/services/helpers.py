@@ -72,6 +72,8 @@ def validate_agreement(agreement):
     if agreement.vehicle.organization_id!=org or agreement.vehicle.owner.organization_id!=org or agreement.customer.organization_id!=org or agreement.driver.organization_id!=org:raise DomainError('Agreement relationships must belong to the organization')
     if agreement.vehicle.owner.kind!='owner' or agreement.customer.kind!='customer' or agreement.driver.kind!='driver':raise DomainError('Party roles do not match agreement')
     if agreement.end_date and agreement.end_date<agreement.start_date:raise DomainError('End date precedes start date')
+    if agreement.branch_id is None:agreement.branch_id=agreement.vehicle.branch_id
+    if agreement.branch_id!=agreement.vehicle.branch_id:raise DomainError("An agreement must be in the same branch as its vehicle")
     clash=Agreement.objects.filter(vehicle_id=agreement.vehicle_id,active=True).exclude(pk=agreement.pk).filter(Q(end_date__isnull=True)|Q(end_date__gte=agreement.start_date))
     if agreement.end_date:clash=clash.filter(start_date__lte=agreement.end_date)
     if clash.exists():raise DomainError('Vehicle has an overlapping active agreement')

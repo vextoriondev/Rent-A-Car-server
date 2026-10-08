@@ -6,13 +6,13 @@ from django.db import IntegrityError
 from django.http import HttpRequest
 from ninja import Schema
 from ninja.errors import HttpError
-from ..models import Membership, Party, Vehicle, Agreement, Period, Obligation, Expense, Contact, AgreementVersion, Invoice, Settlement, MaintenanceCase, Document
+from ..models import Membership, Party, Vehicle, Agreement, Period, Obligation, Expense, Contact, AgreementVersion, Invoice, Settlement, MaintenanceCase, Document, NotificationOutbox, Branch
 from .. import services, policies
 
 class PartyIn(Schema): kind:Literal['owner','driver','customer']; name:str; phone:str=''; email:str=''
-class VehicleIn(Schema): registration:str; model_name:str; owner_id:int
+class VehicleIn(Schema): registration:str; model_name:str; owner_id:int; branch_id:int|None=None
 class AgreementIn(Schema):
-    vehicle_id:int; customer_id:int; driver_id:int; start_date:date; end_date:date|None=None
+    vehicle_id:int; customer_id:int; driver_id:int; start_date:date; end_date:date|None=None; branch_id:int|None=None
     customer_rent:Decimal; owner_rent:Decimal; driver_salary:Decimal
     fuel_responsible:Literal['owner','operator','customer','driver']='owner'
     repair_responsible:Literal['owner','operator','customer','driver']='owner'
@@ -55,6 +55,7 @@ class ConsentIn(Schema): sms:bool|None=None; whatsapp:bool|None=None; email:bool
 class ContactIn(Schema): name:str; phone:str=''; email:str=''; role:Literal['billing','operations','primary','other']='other'
 class AccessIn(Schema): username:str; branch_id:int|None=None
 class BranchIn(Schema): name:str
+class MemberPatch(Schema): role:Literal['admin','accountant','operations','viewer','mechanic']|None=None; branch_id:int|None=None; clear_branch:bool=False
 class LoginIn(Schema): username:str; password:str
 class RegisterIn(Schema): organization_name:str; username:str; email:str=''; password:str
 class QuickAgreementIn(Schema):
@@ -65,17 +66,39 @@ class QuickAgreementIn(Schema):
     offset:bool=False
     driver_provider:Literal['operator','owner','customer']='operator'; driver_paid_by:Literal['operator','owner','customer']='operator'; clauses:str=''
 
-def membership(request:HttpRequest,org_id:int,action:str|None=None):
-    """The caller's membership in org_id (404 if none, so other organizations stay invisible); `action` is checked against policies."""
+GUARD_MODELS={'agreement':Agreement,'period':Period,'expense':Expense,'obligations':Obligation,'invoice':Invoice,'settlement':Settlement,'case':MaintenanceCase,'vehicle':Vehicle,'party':Party,'version':AgreementVersion,'notice':NotificationOutbox}
+
+def guard(member,model,*ids):
+    """404 when a record exists but sits in another branch than a branch-limited member's; ids that do not exist are left to the service (it answers 404 too)."""
+    if not policies.limited_branch(member):return
+    wanted={i for i in ids if i is not None}
+    if not wanted:return
+    existing=model.objects.filter(pk__in=wanted)
+    if policies.branch_scope(member,existing).count()!=existing.count():raise HttpError(404,'Record not found')
+
+def membership(request:HttpRequest,org_id:int,action:str|None=None,**guards):
+    """The caller's membership in org_id (404 if none, so other organizations stay invisible); `action` is checked against policies.
+    Keyword guards (`period=id`, `obligations=[ids]`, see GUARD_MODELS) answer 404 for records outside a branch-limited member's branch."""
     member=Membership.objects.filter(organization_id=org_id,user=request.user).select_related('organization','branch').first()
     if not member:raise HttpError(404,'Organization not found')
     if action and not policies.can(member.role,action):raise HttpError(403,'Your role cannot perform this action')
+    for key,value in guards.items():guard(member,GUARD_MODELS[key],*(value if isinstance(value,(list,tuple,set)) else [value]))
     return member
+
+def pick_branch(member,requested=None):
+    """Branch for a new vehicle: a limited member's own, else the requested one (must belong to the organization), else the member's own or Main."""
+    forced=policies.limited_branch(member)
+    if forced:return member.branch
+    if requested:
+        branch=Branch.objects.filter(pk=requested,organization_id=member.organization_id).first()
+        if not branch:raise HttpError(422,'Branch is invalid')
+        return branch
+    return member.branch or services.default_branch(member.organization)
 
 def result(fn,*args,**kwargs):
     try:return fn(*args,**kwargs)
     except services.DomainError as exc:raise HttpError(422,str(exc)) from exc
-    except (Period.DoesNotExist,Agreement.DoesNotExist,Expense.DoesNotExist,Party.DoesNotExist,Vehicle.DoesNotExist,Obligation.DoesNotExist,Contact.DoesNotExist,AgreementVersion.DoesNotExist,Invoice.DoesNotExist,Settlement.DoesNotExist,MaintenanceCase.DoesNotExist,Document.DoesNotExist):raise HttpError(404,'Record not found')
+    except (Period.DoesNotExist,Agreement.DoesNotExist,Expense.DoesNotExist,Party.DoesNotExist,Vehicle.DoesNotExist,Obligation.DoesNotExist,Contact.DoesNotExist,AgreementVersion.DoesNotExist,Invoice.DoesNotExist,Settlement.DoesNotExist,MaintenanceCase.DoesNotExist,Document.DoesNotExist,Membership.DoesNotExist):raise HttpError(404,'Record not found')
     except IntegrityError as exc:raise HttpError(409,'Duplicate or conflicting record') from exc
 
 def agreement_dict(a):

@@ -11,16 +11,16 @@ router = Router()
 
 @router.post('/orgs/{org_id}/expenses')
 def record_expense(request,org_id:int,payload:ExpenseIn):
-    m=membership(request,org_id,'expense.record')
+    m=membership(request,org_id,'expense.record',period=payload.period_id,case=payload.maintenance_case_id)
     e=result(services.record_expense,m.organization,request.user,payload.dict(),request.headers.get('Idempotency-Key',''),policies.can(m.role,'expense.override'))
     return expense_dict(e)
 
 @router.get('/orgs/{org_id}/expenses')
-def expenses(request,org_id:int,period_id:int|None=None,from_:date|None=Query(None,alias='from'),to:date|None=None,vehicle_id:int|None=None,category:str|None=None,paid_by:str|None=None,responsible:str|None=None,state:str|None=None,limit:int=100,offset:int=0):
+def expenses(request,org_id:int,period_id:int|None=None,from_:date|None=Query(None,alias='from'),to:date|None=None,vehicle_id:int|None=None,category:str|None=None,paid_by:str|None=None,responsible:str|None=None,state:str|None=None,branch_id:int|None=None,limit:int=100,offset:int=0):
     """Entry-date filters (`from`/`to` are exact event dates). `totals` covers the whole filtered set, not just the page."""
-    membership(request,org_id,'read_financial')
+    m=membership(request,org_id,'read_financial')
     start,end=result(services.resolve_range,from_,to)
-    qs=services.entry_dates(Expense.objects.filter(period__organization_id=org_id),start,end)
+    qs=services.entry_dates(policies.branch_scope(m,Expense.objects.filter(period__organization_id=org_id),branch_id),start,end)
     if period_id:qs=qs.filter(period_id=period_id)
     for key,value in(('period__agreement__vehicle_id',vehicle_id),('category',category),('paid_by',paid_by),('responsible',responsible),('state',state)):
         if value:qs=qs.filter(**{key:value})
@@ -31,27 +31,27 @@ def expenses(request,org_id:int,period_id:int|None=None,from_:date|None=Query(No
 
 @router.post('/orgs/{org_id}/expenses/{expense_id}/approve')
 def approve_expense(request,org_id:int,expense_id:int):
-    m=membership(request,org_id,'expense.approve')
+    m=membership(request,org_id,'expense.approve',expense=expense_id)
     return expense_dict(result(services.approve_expense,m.organization,request.user,expense_id))
 
 @router.post('/orgs/{org_id}/expenses/{expense_id}/reverse')
 def reverse_expense(request,org_id:int,expense_id:int,payload:ReasonIn):
-    m=membership(request,org_id,'expense.reverse')
+    m=membership(request,org_id,'expense.reverse',expense=expense_id)
     return expense_dict(result(services.reverse_expense,m.organization,request.user,expense_id,payload.reason))
 
 @router.patch('/orgs/{org_id}/expenses/{expense_id}')
 def update_draft(request,org_id:int,expense_id:int,payload:ExpensePatch):
-    m=membership(request,org_id,'expense.record')
+    m=membership(request,org_id,'expense.record',expense=expense_id)
     return expense_dict(result(services.update_draft,m.organization,request.user,expense_id,payload.dict(exclude_none=True),policies.can(m.role,'expense.override')))
 
 @router.post('/orgs/{org_id}/expenses/{expense_id}/submit')
 def submit_expense(request,org_id:int,expense_id:int):
-    m=membership(request,org_id,'expense.record')
+    m=membership(request,org_id,'expense.record',expense=expense_id)
     return expense_dict(result(services.submit_expense,m.organization,request.user,expense_id))
 
 @router.delete('/orgs/{org_id}/expenses/{expense_id}')
 def discard_draft(request,org_id:int,expense_id:int):
-    m=membership(request,org_id,'expense.record')
+    m=membership(request,org_id,'expense.record',expense=expense_id)
     result(services.discard_draft,m.organization,request.user,expense_id)
     return {'discarded':True}
 
@@ -75,11 +75,11 @@ def update_category(request,org_id:int,category_id:int,payload:CategoryPatch):
 
 @router.put('/orgs/{org_id}/agreement-versions/{version_id}/rules/{category}')
 def set_rule(request,org_id:int,version_id:int,category:str,payload:RuleIn):
-    m=membership(request,org_id,'rules.write')
+    m=membership(request,org_id,'rules.write',version=version_id)
     return rule_dict(result(services.set_expense_rule,m.organization,request.user,version_id,category,**payload.dict()))
 
 @router.delete('/orgs/{org_id}/agreement-versions/{version_id}/rules/{category}')
 def delete_rule(request,org_id:int,version_id:int,category:str):
-    m=membership(request,org_id,'rules.write')
+    m=membership(request,org_id,'rules.write',version=version_id)
     result(services.delete_expense_rule,m.organization,request.user,version_id,category)
     return {'deleted':True}

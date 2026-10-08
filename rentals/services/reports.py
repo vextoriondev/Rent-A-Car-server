@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from django.db.models import CharField, Count, Exists, OuterRef, Sum
 from django.db.models.functions import Cast
-from ..models import Document, ExpenseCategory, Expense, Obligation, Payment, Period
+from ..models import Allocation, Document, ExpenseCategory, Expense, Obligation, Payment, Period
 from .helpers import ZERO, DomainError
 from .ranges import entry_dates, overlapping_periods, resolve_range, as_date
 from .statements import bulk_ledger_statements
@@ -35,6 +35,7 @@ def _page(rows,limit,offset):
 
 def _periods(org,f):
     qs=Period.objects.filter(organization=org).select_related('agreement__vehicle','agreement__customer')
+    if f.get('branch_id'):qs=qs.filter(agreement__branch_id=f['branch_id'])
     if f.get('month'):qs=qs.filter(month=f['month'])
     if f.get('month_from'):qs=qs.filter(month__gte=f['month_from'])
     if f.get('month_to'):qs=qs.filter(month__lte=f['month_to'])
@@ -84,6 +85,7 @@ def _period_report(org,rtype,f,limit,offset):
 
 def _expense_qs(org,f):
     qs=Expense.objects.filter(period__organization=org)
+    if f.get('branch_id'):qs=qs.filter(period__agreement__branch_id=f['branch_id'])
     if f.get('month'):qs=qs.filter(period__month=f['month'])
     if f.get('month_from'):qs=qs.filter(period__month__gte=f['month_from'])
     if f.get('month_to'):qs=qs.filter(period__month__lte=f['month_to'])
@@ -133,7 +135,9 @@ def _entries(org,f,limit,offset):
     rows=[]
     for e in _expense_qs(org,f).exclude(state=Expense.State.DRAFT).select_related('period').order_by('-event_date','-id'):
         rows.append((e.event_date,e.pk,[e.public_id,f'AGR-{e.period.agreement_id}',e.event_date.isoformat(),'Expense',_money(e.amount),e.paid_by.title(),e.responsible.title(),{'pending':'Pending approval','posted':'Posted','reversed':'Reversed'}[e.state],e.reference]))
-    pq=entry_dates(Payment.objects.filter(organization=org),as_date(f.get('from')),as_date(f.get('to'))).prefetch_related('allocations__obligation__period')
+    pq=Payment.objects.filter(organization=org)
+    if f.get('branch_id'):pq=pq.filter(pk__in=Allocation.objects.filter(obligation__period__agreement__branch_id=f['branch_id']).values('payment_id'))
+    pq=entry_dates(pq,as_date(f.get('from')),as_date(f.get('to'))).prefetch_related('allocations__obligation__period')
     for p in pq:
         periods={a.obligation.period for a in p.allocations.all()}
         if f.get('month') and not any(x.month==f['month'] for x in periods):continue

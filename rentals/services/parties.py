@@ -73,3 +73,22 @@ def create_branch(org,name,actor=None):
     branch=Branch.objects.create(organization=org,name=name)
     audit(org,actor,'branch.create','branch',branch.pk,after={'name':name})
     return branch
+
+@transaction.atomic
+def update_member(org,actor,member_id,role=None,branch_id=None,clear_branch=False):
+    """Change a staff member's role or branch. Owner/driver/customer are not grantable roles, and the last admin cannot be demoted."""
+    members=Membership.objects.select_for_update(of=('self',)).filter(organization=org)
+    target=members.select_related('user','branch').filter(pk=member_id,role__in=['admin','accountant','operations','viewer','mechanic']).first()
+    if not target:raise Membership.DoesNotExist
+    before={'role':target.role,'branch_id':target.branch_id}
+    if role is not None and role!=target.role:
+        if target.role=='admin' and not members.filter(role='admin').exclude(pk=target.pk).exists():raise DomainError('An organization needs at least one admin')
+        target.role=role
+    if clear_branch:target.branch=None
+    elif branch_id is not None:
+        branch=Branch.objects.filter(pk=branch_id,organization=org).first()
+        if not branch:raise DomainError('Branch is invalid')
+        target.branch=branch
+    target.save()
+    audit(org,actor,'member.update','membership',target.pk,before=before,after={'role':target.role,'branch_id':target.branch_id})
+    return target

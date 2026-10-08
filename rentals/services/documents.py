@@ -8,6 +8,7 @@ from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.files.storage import FileSystemStorage
 from django.core import signing
+from .. import policies
 from ..models import Agreement, Document, Expense, MaintenanceCase, Party, Payment, Vehicle
 from .audit import audit
 from .helpers import DomainError
@@ -71,7 +72,15 @@ def delete_document(org,user,document_id):
     storage().delete(doc.storage_key);doc.delete()
     audit(org,user,'document.delete',target_type,target_id,before=info)
 
+def in_branch(member,target_type,target_id) -> bool:
+    """False when a branch-limited member points at a record of another branch (or a target type that does not exist)."""
+    model=TARGETS.get(target_type)
+    if not model:return False
+    if not policies.limited_branch(member):return True
+    return policies.branch_scope(member,model.objects.filter(pk=target_id)).exists()
+
 def can_access(member,doc) -> bool:
+    if not in_branch(member,doc.target_type,doc.target_id):return False
     if member.role in('admin','accountant','operations','viewer'):return True
     if member.role=='mechanic':return doc.target_type in MECHANIC_TARGETS
     return False

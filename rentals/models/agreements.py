@@ -8,6 +8,7 @@ class Agreement(models.Model):
     vehicle = models.ForeignKey(Vehicle,on_delete=models.PROTECT)
     customer = models.ForeignKey(Party,on_delete=models.PROTECT,related_name='customer_agreements')
     driver = models.ForeignKey(Party,on_delete=models.PROTECT,related_name='driver_agreements')
+    branch = models.ForeignKey('rentals.Branch',null=True,blank=True,on_delete=models.PROTECT,related_name='agreements',help_text='Always equals the vehicle branch')
     start_date = models.DateField()
     end_date = models.DateField(null=True,blank=True)
     customer_rent = models.DecimalField(max_digits=14,decimal_places=2)
@@ -22,6 +23,9 @@ class Agreement(models.Model):
     status = models.CharField(max_length=10,choices=[('draft','Draft'),('active','Active'),('ended','Ended')],default='active')
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    def save(self,*args,**kwargs):
+        if self.branch_id is None:self.branch_id=self.vehicle.branch_id  # an agreement always sits in its vehicle's branch
+        super().save(*args,**kwargs)
     class Meta: indexes=[models.Index(fields=['organization','vehicle','start_date'])]
 
 class Period(models.Model):

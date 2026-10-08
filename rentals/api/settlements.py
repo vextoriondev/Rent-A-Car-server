@@ -1,6 +1,6 @@
 from ninja import Router
 from ninja.errors import HttpError
-from .. import services
+from .. import policies, services
 from ..models import Settlement
 from ._shared import ReasonIn, SettingsIn, membership, result, settlement_dict, money_dict, paginate
 
@@ -20,44 +20,44 @@ def put_settings(request,org_id:int,payload:SettingsIn):
 
 @router.get('/orgs/{org_id}/periods/{period_id}/settlement-preview')
 def preview(request,org_id:int,period_id:int):
-    m=membership(request,org_id,'read_financial')
+    m=membership(request,org_id,'read_financial',period=period_id)
     return money_dict(result(services.preview_settlement,m.organization,period_id))
 
 @router.post('/orgs/{org_id}/periods/{period_id}/settlement')
 def prepare(request,org_id:int,period_id:int):
-    m=membership(request,org_id,'settlement.prepare')
+    m=membership(request,org_id,'settlement.prepare',period=period_id)
     return settlement_dict(result(services.prepare_settlement,m.organization,request.user,period_id))
 
 @router.get('/orgs/{org_id}/settlements')
-def settlements(request,org_id:int,month:str|None=None,limit:int=100,offset:int=0):
+def settlements(request,org_id:int,month:str|None=None,branch_id:int|None=None,limit:int=100,offset:int=0):
     m=membership(request,org_id,'read_financial')
-    qs=Settlement.objects.filter(organization=m.organization)
+    qs=policies.branch_scope(m,Settlement.objects.filter(organization=m.organization),branch_id)
     if month:qs=qs.filter(month=month)
     return paginate(qs.order_by('-month','-id'),limit,offset,lambda s:settlement_dict(s))
 
 @router.get('/orgs/{org_id}/settlements/{settlement_id}')
 def settlement(request,org_id:int,settlement_id:int):
-    m=membership(request,org_id,'read_financial')
+    m=membership(request,org_id,'read_financial',settlement=settlement_id)
     s=Settlement.objects.filter(pk=settlement_id,organization=m.organization).first()
     if not s:raise HttpError(404,'Settlement not found')
     return settlement_dict(s,lines=True)
 
 @router.post('/orgs/{org_id}/settlements/{settlement_id}/request-approval')
 def request_approval(request,org_id:int,settlement_id:int):
-    m=membership(request,org_id,'settlement.prepare')
+    m=membership(request,org_id,'settlement.prepare',settlement=settlement_id)
     return settlement_dict(result(services.request_settlement_approval,m.organization,request.user,settlement_id),lines=True)
 
 @router.post('/orgs/{org_id}/settlements/{settlement_id}/approve')
 def approve(request,org_id:int,settlement_id:int):
-    m=membership(request,org_id,'approve')
+    m=membership(request,org_id,'approve',settlement=settlement_id)
     return settlement_dict(result(services.approve_settlement,m.organization,request.user,settlement_id,m.role))
 
 @router.post('/orgs/{org_id}/settlements/{settlement_id}/close')
 def close(request,org_id:int,settlement_id:int):
-    m=membership(request,org_id,'settle')
+    m=membership(request,org_id,'settle',settlement=settlement_id)
     return settlement_dict(result(services.close_settlement,m.organization,request.user,settlement_id),lines=True)
 
 @router.post('/orgs/{org_id}/settlements/{settlement_id}/reopen')
 def reopen(request,org_id:int,settlement_id:int,payload:ReasonIn):
-    m=membership(request,org_id,'reopen')
+    m=membership(request,org_id,'reopen',settlement=settlement_id)
     return settlement_dict(result(services.reopen_settlement,m.organization,request.user,settlement_id,payload.reason))

@@ -1,6 +1,6 @@
 from django.conf import settings
 from django.db import models
-from .organizations import Organization
+from .organizations import Organization, Branch
 
 class Party(models.Model):
     class Kind(models.TextChoices): OWNER='owner','Owner'; DRIVER='driver','Driver'; CUSTOMER='customer','Customer'
@@ -16,6 +16,7 @@ class Party(models.Model):
     consent_email = models.BooleanField(default=False)
     consent_updated_at = models.DateTimeField(null=True,blank=True)
     consent_source = models.CharField(max_length=120,blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL,null=True,blank=True,on_delete=models.SET_NULL,related_name='+',help_text='Lets a branch-limited user see a party they created before it is linked to an agreement')
     class Meta: indexes=[models.Index(fields=['organization','kind','name'])]
 
 class Contact(models.Model):
@@ -40,4 +41,9 @@ class Vehicle(models.Model):
     registration = models.CharField(max_length=64)
     model_name = models.CharField(max_length=120)
     owner = models.ForeignKey(Party,on_delete=models.PROTECT,related_name='vehicles')
+    branch = models.ForeignKey('rentals.Branch',null=True,blank=True,on_delete=models.PROTECT,related_name='vehicles')
+    def save(self,*args,**kwargs):
+        if self.branch_id is None and self.organization_id:  # keep every vehicle in a branch, whichever code path created it
+            self.branch=Branch.objects.get_or_create(organization_id=self.organization_id,name='Main')[0]
+        super().save(*args,**kwargs)
     class Meta: constraints=[models.UniqueConstraint(fields=['organization','registration'],name='unique_registration_org')]
