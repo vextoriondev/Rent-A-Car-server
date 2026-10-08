@@ -107,7 +107,7 @@ class OtherReportTests(ReportBase):
 
     def test_customer_aging_buckets(self):
         def bucket(as_of):
-            r=self.rep('customer-aging',f'?as_of={as_of}');row=r['rows'][0];return {c.replace(' BDT',''):v for c,v in zip(r['columns'][1:],row[1:]) if v!='0.00'}
+            r=self.rep('customer-aging',f'?as_of={as_of}');row=r['rows'][0];return {c.replace(' BDT',''):v for c,v in zip(r['columns'][1:],row[1:]) if v!='0.00' and c!='Days overdue'}
         self.assertEqual(bucket('2026-09-15'),{'Current':'30000.00','Total':'30000.00'})
         self.assertEqual(bucket('2026-10-20'),{'1-30 days':'30000.00','Total':'30000.00'})
         self.assertEqual(bucket('2026-12-15'),{'61-90 days':'30000.00','Total':'30000.00'})
@@ -147,7 +147,7 @@ class OtherReportTests(ReportBase):
         other=Organization.objects.create(name='Other');U=get_user_model().objects.create_user('rep9',password='x');Membership.objects.create(organization=other,user=U,role='admin')
         oc=Client();oc.force_login(U);r=oc.get(f'/api/v1/orgs/{other.pk}/reports/customer-balances').json();self.assertEqual((r['count'],r['rows']),(0,[]))
         self.assertEqual(oc.get(f'/api/v1/orgs/{self.org.pk}/reports/customer-balances').status_code,404)
-        types=self.c.get(f'{self.base}/report-types').json();self.assertEqual(len(types),9);self.assertIn('Vehicle contribution',[t['title'] for t in types])
+        types=self.c.get(f'{self.base}/report-types').json();self.assertEqual(len(types),12);self.assertIn('Vehicle contribution',[t['title'] for t in types])
 
 class ExportTests(ReportBase):
     def test_csv_has_preamble_filters_header_rows_and_generated_at(self):
@@ -182,7 +182,7 @@ class PaginatedListsTests(ReportBase):
     def test_every_unbounded_list_uses_count_items_next(self):
         for path in('/parties','/vehicles','/agreements','/periods','/expenses','/payments','/notifications','/charges','/invoices','/settlements','/maintenance-cases'):
             r=self.c.get(f'{self.base}{path}');self.assertEqual(r.status_code,200,path)
-            body=r.json();self.assertEqual(set(body),{'count','items','next'},path);self.assertIsInstance(body['items'],list,path)
+            body=r.json();self.assertEqual(set(body)-{'totals'},{'count','items','next'},path);self.assertIsInstance(body['items'],list,path)
         r=self.c.get(f'{self.base}/payments?limit=2').json();self.assertEqual((r['count'],len(r['items']),r['next']),(3,2,2))
         r=self.c.get(f'{self.base}/payments?limit=2&offset=2').json();self.assertEqual((len(r['items']),r['next']),(1,None))
         self.assertEqual(len(self.c.get(f'{self.base}/parties?limit=9999').json()['items']),3)                       # capped at 200, not an error

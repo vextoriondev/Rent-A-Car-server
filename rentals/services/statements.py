@@ -11,6 +11,14 @@ BILL={'obligation','charge'}
 PAY={'payment','payment_advance'}
 MARGIN_KINDS={'customer_rent','owner_rent','driver_salary','charge','credit','adjustment'}
 
+def customer_bill_state(due):
+    """paid = nothing left to collect (an overpayment also counts as paid); outstanding = the customer still owes us."""
+    return 'outstanding' if due>0 else 'paid'
+
+def payable_bill_state(due):
+    """Owner or driver side: outstanding = we owe them; owed_to_us = they owe the operator (negative due); paid = zero."""
+    return 'outstanding' if due>0 else 'owed_to_us' if due<0 else 'paid'
+
 def _sections(period,rows):
     """Statement figures from one period's journal rows [(account, source_type, debit, credit)]."""
     def nd(account,sources=None):return sum((d-c for a,s,d,c in rows if a==account and (sources is None or s in sources)),ZERO)
@@ -20,9 +28,9 @@ def _sections(period,rows):
     d_earned=nc('DRIVER_PAYABLE',BILL);d_paid=nd('DRIVER_PAYABLE',PAY);d_advance=nd('DRIVER_PAYABLE',{'payment_advance'});d_carried=nd('DRIVER_PAYABLE',{'carry_out'})
     owner_due=o_gross-o_offsets-o_carried-o_paid
     return {'period_id':period.pk,'month':period.month.isoformat(),'closed':bool(period.closed_at),
-        'customer':{'billed':c_billed,'received':c_received,'carried_forward':c_carried,'due':c_billed-c_carried-c_received,'separate_recoverable':nd('CUSTOMER_RECOVERABLE')},
-        'owner':{'gross':o_gross,'offsets':o_offsets,'net':o_gross-o_offsets,'paid':o_paid,'carried_forward':o_carried,'due':owner_due,'separate_recoverable':nd('OWNER_RECOVERABLE'),'owner_owes_operator':owner_due<0},
-        'driver':{'earned':d_earned,'paid':d_paid,'advance':d_advance,'carried_forward':d_carried,'due':d_earned-d_carried-d_paid,'separate_recoverable':nd('DRIVER_RECOVERABLE')},
+        'customer':{'billed':c_billed,'received':c_received,'carried_forward':c_carried,'due':c_billed-c_carried-c_received,'bill_state':customer_bill_state(c_billed-c_carried-c_received),'separate_recoverable':nd('CUSTOMER_RECOVERABLE')},
+        'owner':{'gross':o_gross,'offsets':o_offsets,'net':o_gross-o_offsets,'paid':o_paid,'carried_forward':o_carried,'due':owner_due,'separate_recoverable':nd('OWNER_RECOVERABLE'),'owner_owes_operator':owner_due<0,'bill_state':payable_bill_state(owner_due)},
+        'driver':{'earned':d_earned,'paid':d_paid,'advance':d_advance,'carried_forward':d_carried,'due':d_earned-d_carried-d_paid,'bill_state':payable_bill_state(d_earned-d_carried-d_paid),'separate_recoverable':nd('DRIVER_RECOVERABLE')},
         'operator':{'accrual_margin':nc('RENT_REVENUE')+nc('OTHER_REVENUE')-nd('OWNER_RENT_EXPENSE')-nd('DRIVER_SALARY_EXPENSE')-nd('OPERATING_EXPENSE'),'recorded_cash_movement':nd('CASH'),'operator_borne_costs':nd('OPERATING_EXPENSE')}}
 
 def ledger_statement(period):
@@ -67,5 +75,6 @@ def diff_statements(a,b):
     out=[]
     for section in ('customer','owner','driver','operator'):
         for key in a[section]:
+            if key=='bill_state':continue  # derived from 'due', only present on the ledger statement
             if a[section][key]!=b[section].get(key):out.append(f'{section}.{key}')
     return out

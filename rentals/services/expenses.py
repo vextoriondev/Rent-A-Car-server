@@ -31,6 +31,20 @@ def create_category(org,code,name):
     if not created:raise DomainError('Category already exists')
     return cat
 
+@transaction.atomic
+def update_category(org,user,category_id,data):
+    """Rename and/or (de)activate a category. The code never changes; inactive categories stay valid for history, filters and reports."""
+    cat=ExpenseCategory.objects.select_for_update().get(pk=category_id,organization=org)
+    before={'name':cat.name,'active':cat.active}
+    name=data.get('name');active=data.get('active')
+    if name is not None:
+        if not name.strip():raise DomainError('A category needs a name')
+        cat.name=name.strip()
+    if active is not None:cat.active=active
+    cat.save(update_fields=['name','active'])
+    audit(org,user,'category.update','expense_category',cat.pk,before=before,after={'name':cat.name,'active':cat.active})
+    return cat
+
 def resolve_rule(period,category):
     """The rule that applied: an explicit ExpenseRule of the period's version, else the version's fuel/repair columns, else no constraint."""
     terms=period_terms(period)
@@ -47,7 +61,9 @@ def _prepare(org,p,data,can_override,exclude_pk=None):
     amount=bd(data['amount'])
     category=data['category'].strip().lower()
     cat=ExpenseCategory.objects.filter(organization=org,code=category,active=True).first()
-    if not cat:raise DomainError('Unsupported expense category')
+    if not cat:
+        gone=ExpenseCategory.objects.filter(organization=org,code=category,active=False).first()
+        raise DomainError(f'The category "{gone.name}" is deactivated and cannot be used for new expenses' if gone else 'Unsupported expense category')
     liable=data['responsible']
     if liable not in PARTIES:raise DomainError('Unsupported responsible party')
     paid_by=data['paid_by']

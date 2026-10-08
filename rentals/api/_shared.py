@@ -25,6 +25,7 @@ class ExpensePatch(Schema):
     category:str|None=None; amount:Decimal|None=None; event_date:date|None=None; paid_by:Literal['operator','owner','customer','driver']|None=None; responsible:Literal['owner','operator','customer','driver']|None=None; offset_owner:bool|None=None; reference:str|None=None; description:str|None=None
     receipt_reference:str|None=None; override_reason:str|None=None; allow_duplicate_reason:str|None=None
 class CategoryIn(Schema): code:str; name:str
+class CategoryPatch(Schema): name:str|None=None; active:bool|None=None
 class RuleIn(Schema):
     responsible:Literal['owner','operator','customer','driver']; first_payer:Literal['operator','owner','customer','driver']='operator'; reimbursable:bool=True; deductible_from:Literal['owner_payable','none']='none'
     approval_threshold:Decimal|None=None; proof_required:bool=False; notify_parties:bool=True
@@ -102,7 +103,7 @@ def charge_dict(c):
     return {'id':c.pk,'kind':c.kind,'direction':c.direction,'side':c.side,'party_id':c.party_id,'period_id':c.period_id,'amount':str(c.amount),'description':c.description,'reference':c.reference,'obligation_id':c.obligation_id}
 
 def invoice_dict(i,summary):
-    return {'id':i.pk,'number':i.number,'party_id':i.party_id,'period_id':i.period_id,'issue_date':i.issue_date.isoformat(),'due_date':i.due_date.isoformat(),'state':i.state,'status':summary['status'],'amount':str(summary['amount']),'paid':str(summary['paid']),'outstanding':str(summary['outstanding']),'lines':[{'obligation_id':l.obligation_id,'description':l.description,'amount':str(l.amount)} for l in i.lines.all()]}
+    return {'id':i.pk,'number':i.number,'party_id':i.party_id,'period_id':i.period_id,'issue_date':i.issue_date.isoformat(),'due_date':i.due_date.isoformat(),'state':i.state,'status':summary['status'],'bill_state':summary['bill_state'],'amount':str(summary['amount']),'paid':str(summary['paid']),'outstanding':str(summary['outstanding']),'lines':[{'obligation_id':l.obligation_id,'description':l.description,'amount':str(l.amount)} for l in i.lines.all()]}
 
 def settlement_dict(s,lines=False):
     d={'id':s.pk,'period_id':s.period_id,'agreement_id':s.agreement_id,'month':s.month.isoformat(),'state':s.state,'version':s.version,'prepared_at':s.prepared_at.isoformat() if s.prepared_at else None,'approved_at':s.approved_at.isoformat() if s.approved_at else None,'closed_at':s.closed_at.isoformat() if s.closed_at else None,'reopen_reason':s.reopen_reason}

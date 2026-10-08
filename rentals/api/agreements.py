@@ -2,7 +2,7 @@ from datetime import date
 from decimal import Decimal
 from django.db import transaction
 from django.db.models import Q
-from ninja import Router
+from ninja import Query, Router
 from ninja.errors import HttpError
 from ..models import Party, Vehicle, Agreement, Period
 from .. import policies, services
@@ -55,10 +55,12 @@ def issue_period(request,org_id:int,agreement_id:int,month:date):
     return {'period_id':p.pk,'month':p.month.isoformat(),'obligations':[{'id':o.pk,'kind':o.kind,'party_id':o.party_id,'amount':str(o.amount)} for o in p.obligations.all()]}
 
 @router.get('/orgs/{org_id}/periods')
-def periods(request,org_id:int,month:date|None=None,limit:int=100,offset:int=0):
+def periods(request,org_id:int,month:date|None=None,from_:date|None=Query(None,alias='from'),to:date|None=None,limit:int=100,offset:int=0):
     m=membership(request,org_id,'read')
     qs=policies.scope_queryset(request.user,m,Period.objects.all())
     if month:qs=qs.filter(month=month)
+    start,end=result(services.resolve_range,from_,to)
+    qs=services.overlapping_periods(qs,start,end)  # every period that overlaps the range, not prorated
     return paginate(qs.order_by('-month','agreement_id'),limit,offset,lambda p:{'id':p.pk,'agreement_id':p.agreement_id,'month':p.month.isoformat(),'closed':bool(p.closed_at)})
 
 @router.get('/orgs/{org_id}/periods/{period_id}/statement')
