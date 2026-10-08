@@ -29,7 +29,7 @@ def invoice_summary(invoice,today=None):
     elif invoice.due_date<today:status='overdue'
     elif paid>0:status='partially_paid'
     else:status='issued'
-    return {'amount':amount,'paid':paid,'outstanding':outstanding,'status':status}
+    return {'amount':amount,'paid':paid,'outstanding':outstanding,'status':status,'bill_state':None if status=='void' else 'paid' if outstanding<=0 else 'outstanding'}
 
 @transaction.atomic
 def issue_invoice(org,user,data,key):

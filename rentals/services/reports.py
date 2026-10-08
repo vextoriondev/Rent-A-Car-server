@@ -7,8 +7,9 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from django.db.models import CharField, Count, Exists, OuterRef, Sum
 from django.db.models.functions import Cast
-from ..models import Document, Expense, Obligation, Payment, Period
+from ..models import Document, ExpenseCategory, Expense, Obligation, Payment, Period
 from .helpers import ZERO, DomainError
+from .ranges import entry_dates, overlapping_periods, resolve_range, as_date
 from .statements import bulk_ledger_statements
 
 # Column sets match the frontend's current CSV exports (lib/reports.ts).
@@ -18,9 +19,12 @@ PERIOD_REPORTS={
     'customer-balances':{'title':'Customer balances','party':'Customer','columns':['Billed','Received','Outstanding'],'values':lambda s:[s['customer']['billed'],s['customer']['received'],s['customer']['due']]},
     'owner-liability':{'title':'Owner liability','party':'Owner','columns':['Gross','Offsets','Paid','Due'],'values':lambda s:[s['owner']['gross'],s['owner']['offsets'],s['owner']['paid'],s['owner']['due']]},
     'driver-payroll':{'title':'Driver payroll','party':'Driver','columns':['Earned','Advance','Paid','Due'],'values':lambda s:[s['driver']['earned'],s['driver']['advance'],s['driver']['paid'],s['driver']['due']]},
+    'income':{'title':'Income','party':'Customer','columns':['Billed','Collected','Outstanding','Owner rent','Driver salary','Operator costs','Margin'],
+        'values':lambda s:[s['customer']['billed'],s['customer']['received'],s['customer']['due'],s['owner']['gross'],s['driver']['earned'],s['operator']['operator_borne_costs'],s['operator']['accrual_margin']]},
     'cash-movement':{'title':'Cash movement','party':'Customer','columns':['Receipts','Owner paid','Driver paid','Net cash'],'values':lambda s:[s['customer']['received'],s['owner']['paid'],s['driver']['paid'],s['operator']['recorded_cash_movement']]},
 }
-OTHER_REPORTS={'cost-by-responsible':'Cost by responsible party','customer-aging':'Customer aging','missing-receipts':'Missing receipts','entries':'Entries'}
+OTHER_REPORTS={'cost-by-responsible':'Cost by responsible party','customer-aging':'Customer aging','missing-receipts':'Missing receipts','entries':'Entries','daily-expenses':'Daily expenses','category-by-vehicle':'Cost category by vehicle'}
+BILL_SIDE={'customer-balances':'customer','owner-liability':'owner','driver-payroll':'driver'}
 REPORT_TYPES=list(PERIOD_REPORTS)+list(OTHER_REPORTS)
 AGING_BUCKETS=[('Current',0),('1-30 days',30),('31-60 days',60),('61-90 days',90),('Over 90 days',None)]
 
@@ -34,6 +38,7 @@ def _periods(org,f):
     if f.get('month'):qs=qs.filter(month=f['month'])
     if f.get('month_from'):qs=qs.filter(month__gte=f['month_from'])
     if f.get('month_to'):qs=qs.filter(month__lte=f['month_to'])
+    qs=overlapping_periods(qs,as_date(f.get('from')),as_date(f.get('to')))
     if f.get('agreement_id'):qs=qs.filter(agreement_id=f['agreement_id'])
     if f.get('vehicle_id'):qs=qs.filter(agreement__vehicle_id=f['vehicle_id'])
     if f.get('customer_id'):qs=qs.filter(agreement__customer_id=f['customer_id'])
@@ -53,23 +58,29 @@ def _money(x):return str(Decimal(x).quantize(Decimal('0.01')))
 def run_report(org,rtype,filters=None,limit=100,offset=0,as_of=None):
     """limit=None returns every row (exports). Returns {'report','title','columns','rows','totals','count','next','filters'}; rows are lists aligned with columns."""
     f={k:v for k,v in (filters or {}).items() if v not in(None,'')}
+    resolve_range(f.get('from'),f.get('to'))
     if rtype in PERIOD_REPORTS:return _period_report(org,rtype,f,limit,offset)
     if rtype=='cost-by-responsible':return _cost_report(org,f,limit,offset)
     if rtype=='customer-aging':return _aging_report(org,f,limit,offset,as_of or date.today())
     if rtype=='missing-receipts':return _missing_receipts(org,f,limit,offset)
     if rtype=='entries':return _entries(org,f,limit,offset)
+    if rtype=='daily-expenses':return _daily_expenses(org,f,limit,offset)
+    if rtype=='category-by-vehicle':return _category_by_vehicle(org,f,limit,offset)
     raise DomainError('Unknown report')
 
 def _period_report(org,rtype,f,limit,offset):
     cfg=PERIOD_REPORTS[rtype];periods=list(_periods(org,f))
     stmts=bulk_ledger_statements(periods);names=_parties(periods)
     columns=['Agreement','Vehicle',cfg['party'],'Month']+[c+' BDT' for c in cfg['columns']]
-    rows=[];totals=[ZERO]*len(cfg['columns'])
+    rows=[];states=[];totals=[ZERO]*len(cfg['columns'])
     for p in periods:
         vals=cfg['values'](stmts[p.pk]);totals=[t+v for t,v in zip(totals,vals)]
+        if rtype in BILL_SIDE:states.append(stmts[p.pk][BILL_SIDE[rtype]]['bill_state'])
         rows.append([f'AGR-{p.agreement_id}',p.agreement.vehicle.registration,names[p.pk][cfg['party'].lower()],p.month.isoformat()]+[_money(v) for v in vals])
     page,nxt=_page(rows,limit,offset)
-    return {'report':rtype,'title':cfg['title'],'columns':columns,'rows':page,'totals':dict(zip([c+' BDT' for c in cfg['columns']],[_money(t) for t in totals])),'count':len(rows),'next':nxt,'filters':f}
+    out={'report':rtype,'title':cfg['title'],'columns':columns,'rows':page,'totals':dict(zip([c+' BDT' for c in cfg['columns']],[_money(t) for t in totals])),'count':len(rows),'next':nxt,'filters':f}
+    if states:out['bill_states']=_page(states,limit,offset)[0]  # aligned with rows; the UI chooses the colours
+    return out
 
 def _expense_qs(org,f):
     qs=Expense.objects.filter(period__organization=org)
@@ -79,6 +90,10 @@ def _expense_qs(org,f):
     if f.get('agreement_id'):qs=qs.filter(period__agreement_id=f['agreement_id'])
     if f.get('vehicle_id'):qs=qs.filter(period__agreement__vehicle_id=f['vehicle_id'])
     if f.get('customer_id'):qs=qs.filter(period__agreement__customer_id=f['customer_id'])
+    qs=entry_dates(qs,as_date(f.get('from')),as_date(f.get('to')))
+    if f.get('date'):qs=qs.filter(event_date=as_date(f['date']))
+    for key in('category','paid_by','responsible','state'):
+        if f.get(key):qs=qs.filter(**{key:f[key]})
     return qs
 
 def _cost_report(org,f,limit,offset):
@@ -90,19 +105,20 @@ def _cost_report(org,f,limit,offset):
 def _aging_report(org,f,limit,offset,as_of):
     """Outstanding customer balance per customer, aged from the end of the billing month."""
     periods=list(_periods(org,f));stmts=bulk_ledger_statements(periods);names=_parties(periods)
-    buckets={}
+    buckets={};oldest={}
     for p in periods:
         due=stmts[p.pk]['customer']['due']
         if due<=0:continue
         month_end=(p.month.replace(day=28)+timedelta(days=4)).replace(day=1)-timedelta(days=1)
         days=(as_of-month_end).days
         idx=0 if days<=0 else next((i for i,(_,hi) in enumerate(AGING_BUCKETS) if hi is not None and days<=hi),len(AGING_BUCKETS)-1)
-        row=buckets.setdefault(names[p.pk]['customer'],[ZERO]*len(AGING_BUCKETS));row[idx]+=due
-    rows=[[name]+[_money(v) for v in vals]+[_money(sum(vals,ZERO))] for name,vals in sorted(buckets.items())]
+        name=names[p.pk]['customer'];row=buckets.setdefault(name,[ZERO]*len(AGING_BUCKETS));row[idx]+=due
+        oldest[name]=max(oldest.get(name,0),days)
+    rows=[[name]+[_money(v) for v in vals]+[_money(sum(vals,ZERO)),max(oldest[name],0)] for name,vals in sorted(buckets.items())]
     totals=[sum((v[i] for v in buckets.values()),ZERO) for i in range(len(AGING_BUCKETS))]
     page,nxt=_page(rows,limit,offset)
-    cols=['Customer']+[b+' BDT' for b,_ in AGING_BUCKETS]+['Total BDT']
-    return {'report':'customer-aging','title':OTHER_REPORTS['customer-aging'],'columns':cols,'rows':page,'totals':dict(zip(cols[1:],[_money(t) for t in totals]+[_money(sum(totals,ZERO))])),'count':len(rows),'next':nxt,'filters':{**f,'as_of':as_of.isoformat()}}
+    cols=['Customer']+[b+' BDT' for b,_ in AGING_BUCKETS]+['Total BDT','Days overdue']
+    return {'report':'customer-aging','title':OTHER_REPORTS['customer-aging'],'columns':cols,'rows':page,'totals':dict(zip(cols[1:-1],[_money(t) for t in totals]+[_money(sum(totals,ZERO))])),'count':len(rows),'next':nxt,'filters':{**f,'as_of':as_of.isoformat()}}
 
 def _missing_receipts(org,f,limit,offset):
     has_doc=Document.objects.filter(organization=org,target_type='expense',target_id=OuterRef('pk_str'))
@@ -117,7 +133,7 @@ def _entries(org,f,limit,offset):
     rows=[]
     for e in _expense_qs(org,f).exclude(state=Expense.State.DRAFT).select_related('period').order_by('-event_date','-id'):
         rows.append((e.event_date,e.pk,[e.public_id,f'AGR-{e.period.agreement_id}',e.event_date.isoformat(),'Expense',_money(e.amount),e.paid_by.title(),e.responsible.title(),{'pending':'Pending approval','posted':'Posted','reversed':'Reversed'}[e.state],e.reference]))
-    pq=Payment.objects.filter(organization=org).prefetch_related('allocations__obligation__period')
+    pq=entry_dates(Payment.objects.filter(organization=org),as_date(f.get('from')),as_date(f.get('to'))).prefetch_related('allocations__obligation__period')
     for p in pq:
         periods={a.obligation.period for a in p.allocations.all()}
         if f.get('month') and not any(x.month==f['month'] for x in periods):continue
@@ -128,6 +144,37 @@ def _entries(org,f,limit,offset):
     rows.sort(key=lambda r:(r[0],r[1]),reverse=True);flat=[r[2] for r in rows]
     page,nxt=_page(flat,limit,offset)
     return {'report':'entries','title':OTHER_REPORTS['entries'],'columns':['ID','Agreement','Date','Type','Amount BDT','Paid by','Responsible','Status','Reference'],'rows':page,'totals':{},'count':len(flat),'next':nxt,'filters':f}
+
+def _has_receipt(qs,org):
+    doc=Document.objects.filter(organization=org,target_type='expense',target_id=OuterRef('pk_str'))
+    return qs.annotate(pk_str=Cast('pk',CharField())).annotate(has_doc=Exists(doc))
+
+def _daily_expenses(org,f,limit,offset):
+    """One row per expense recorded for the day (drafts excluded unless asked for by state); totals count posted expenses only so they reconcile to the ledger."""
+    if not f.get('date'):raise DomainError('A date is required')
+    qs=_has_receipt(_expense_qs(org,f),org).select_related('period__agreement__vehicle')
+    if not f.get('state'):qs=qs.exclude(state=Expense.State.DRAFT)
+    items=list(qs.order_by('id'))
+    rows=[[e.period.agreement.vehicle.registration,f'AGR-{e.period.agreement_id}',e.category.replace('_',' ').title(),_money(e.amount),e.paid_by.title(),e.responsible.title(),e.get_state_display(),e.reference,'Yes' if (e.receipt_reference or e.has_doc) else 'No'] for e in items]
+    posted=[e for e in items if e.state==Expense.State.POSTED]
+    def by(key):
+        out={}
+        for e in posted:out[key(e)]=out.get(key(e),ZERO)+e.amount
+        return {k:_money(v) for k,v in sorted(out.items())}
+    page,nxt=_page(rows,limit,offset)
+    return {'report':'daily-expenses','title':OTHER_REPORTS['daily-expenses'],'columns':['Vehicle','Agreement','Category','Amount BDT','Paid by','Responsible','State','Reference','Receipt'],'rows':page,'totals':{'Amount BDT':_money(sum((e.amount for e in posted),ZERO))},
+        'breakdowns':{'by_category':by(lambda e:e.category.replace('_',' ').title()),'by_responsible':by(lambda e:e.responsible.title())},'count':len(rows),'next':nxt,'filters':f}
+
+def _category_by_vehicle(org,f,limit,offset):
+    """Posted cost of one category per vehicle for any range of entry dates; a deactivated category still works (history)."""
+    if not f.get('category'):raise DomainError('A category is required')
+    cat=ExpenseCategory.objects.filter(organization=org,code=f['category']).first()
+    if not cat:raise DomainError('Unknown expense category')
+    qs=_expense_qs(org,{k:v for k,v in f.items() if k not in('state',)}).filter(state=Expense.State.POSTED)
+    agg=qs.values('period__agreement__vehicle__registration','period__agreement__vehicle__model_name').annotate(n=Count('id'),amount=Sum('amount')).order_by('period__agreement__vehicle__registration')
+    rows=[[r['period__agreement__vehicle__registration'],r['period__agreement__vehicle__model_name'],r['n'],_money(r['amount'])] for r in agg]
+    total=sum((Decimal(r[3]) for r in rows),ZERO);page,nxt=_page(rows,limit,offset)
+    return {'report':'category-by-vehicle','title':OTHER_REPORTS['category-by-vehicle']+': '+cat.name,'columns':['Vehicle','Model','Entries','Amount BDT'],'rows':page,'totals':{'Amount BDT':_money(total)},'count':len(rows),'next':nxt,'filters':f}
 
 _FORMULA=re.compile(r'^(?:[=+@\t\r]|-(?![\d.]))')
 
@@ -144,4 +191,7 @@ def report_csv(org,rtype,filters=None,as_of=None):
     w.writerow(['Filters','; '.join(f'{k}={v}' for k,v in sorted(data['filters'].items())) or 'none']);w.writerow([])
     w.writerow(data['columns']+(['Generated at'] if rtype in PERIOD_REPORTS else []))
     for r in data['rows']:w.writerow([excel_safe(c) for c in r]+([now] if rtype in PERIOD_REPORTS else []))
+    for name,part in data.get('breakdowns',{}).items():
+        w.writerow([]);w.writerow([name.replace('_',' ').capitalize(),'Amount BDT'])
+        for k,v in part.items():w.writerow([excel_safe(k),v])
     return '﻿'+buf.getvalue()
