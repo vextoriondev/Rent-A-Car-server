@@ -9,14 +9,14 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import FileSystemStorage
 from django.core import signing
 from .. import policies
-from ..models import Agreement, Document, Expense, MaintenanceCase, Party, Payment, Vehicle
+from ..models import Agreement, Charge, DriverAgreement, Document, Expense, MaintenanceCase, Party, Payment, Vehicle
 from .audit import audit
 from .helpers import DomainError
 
 MAX_BYTES=10*1024*1024
 ALLOWED={'application/pdf':'.pdf','image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp'}
 SALT='rentflow.document'
-TARGETS={'expense':Expense,'payment':Payment,'agreement':Agreement,'vehicle':Vehicle,'party':Party,'maintenance_case':MaintenanceCase}
+TARGETS={'driver_agreement':DriverAgreement,'charge':Charge,'expense':Expense,'payment':Payment,'agreement':Agreement,'vehicle':Vehicle,'party':Party,'maintenance_case':MaintenanceCase}
 MECHANIC_TARGETS={'maintenance_case','vehicle'}
 
 def storage():
@@ -44,7 +44,9 @@ def _clean_name(name:str) -> str:
     base=re.sub(r'[^A-Za-z0-9._ -]','_',base)[:120]
     return base or 'document'
 
-def upload_document(org,user,target_type,target_id,filename,content_type,data:bytes,role='admin'):
+def upload_document(org,user,target_type,target_id,filename,content_type,data:bytes,role='admin',category=''):
+    if category not in('','identity'):raise DomainError('Unknown document category')
+    if category=='identity' and (role!='admin' or target_type!='party'):raise DomainError('Identity documents are filed by an administrator on a party')
     if role=='mechanic' and target_type not in MECHANIC_TARGETS:raise DomainError('Mechanics can only attach files to maintenance cases and vehicles')
     _target(org,target_type,target_id)
     if not data:raise DomainError('The file is empty')
@@ -54,13 +56,14 @@ def upload_document(org,user,target_type,target_id,filename,content_type,data:by
     scan_hook(data,content_type)
     key=f'{org.pk}/{uuid.uuid4().hex}{ALLOWED[content_type]}'
     storage().save(key,ContentFile(data))
-    doc=Document.objects.create(organization=org,target_type=target_type,target_id=str(target_id),storage_key=key,original_name=_clean_name(filename),content_type=content_type,size=len(data),sha256=hashlib.sha256(data).hexdigest(),uploaded_by=user)
+    doc=Document.objects.create(organization=org,target_type=target_type,target_id=str(target_id),storage_key=key,original_name=_clean_name(filename),content_type=content_type,size=len(data),sha256=hashlib.sha256(data).hexdigest(),category=category,uploaded_by=user)
     audit(org,user,'document.upload',target_type,target_id,after={'document_id':doc.pk,'name':doc.original_name,'size':doc.size,'sha256':doc.sha256})
     return doc
 
 def _removable(doc,target):
     if doc.target_type=='expense':return target.state==Expense.State.DRAFT
     if doc.target_type=='agreement':return target.status=='draft'
+    if doc.target_type=='driver_agreement':return True  # a signed copy may be replaced; the file hash stays in the audit trail
     return False
 
 def delete_document(org,user,document_id):
@@ -81,6 +84,7 @@ def in_branch(member,target_type,target_id) -> bool:
 
 def can_access(member,doc) -> bool:
     if not in_branch(member,doc.target_type,doc.target_id):return False
+    if doc.category=='identity':return member.role=='admin'
     if member.role in('admin','accountant','operations','viewer'):return True
     if member.role=='mechanic':return doc.target_type in MECHANIC_TARGETS
     return False

@@ -103,6 +103,11 @@ class ScopeTests(BranchBase):
         self.assertEqual(self.login('mech_syl').post(f'{self.base}/maintenance-cases',{'vehicle_id':self.car.pk,'issue':'Brake'},content_type='application/json').status_code,404)
         self.assertEqual(len(self.ids('acc_syl','/maintenance-cases')),1);self.assertEqual(self.ids('acc_main','/maintenance-cases'),set())
 
+    def test_snapshot_notice_detail_is_readable_text(self):
+        details=[n['detail'] for n in self.get('admin_all','/snapshot?month=2026-09-01').json()['notices']]
+        self.assertTrue(details);self.assertTrue(all('{' not in d and "'" not in d for d in details),details)
+        self.assertIn('Rent issued for period',' '.join(details))
+
     def test_snapshot_is_scoped_and_admin_can_pick_a_branch(self):
         snap=lambda who,q='':self.get(who,f'/snapshot?month=2026-09-01{q}').json()
         self.assertEqual([a['registration'] for a in snap('acc_main')['agreements']],['DHA-19-7724'])

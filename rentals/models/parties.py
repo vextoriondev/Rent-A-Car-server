@@ -16,6 +16,8 @@ class Party(models.Model):
     consent_email = models.BooleanField(default=False)
     consent_updated_at = models.DateTimeField(null=True,blank=True)
     consent_source = models.CharField(max_length=120,blank=True)
+    nid_number = models.CharField(max_length=40,blank=True,help_text='Protected: admin only (M16). Never serialized outside /parties/{id}/ids')
+    driving_licence_number = models.CharField(max_length=40,blank=True,help_text='Protected: admin only (M16)')
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL,null=True,blank=True,on_delete=models.SET_NULL,related_name='+',help_text='Lets a branch-limited user see a party they created before it is linked to an agreement')
     class Meta: indexes=[models.Index(fields=['organization','kind','name'])]
 

@@ -15,6 +15,7 @@ def _billable(org,period):
 
 def preview_invoice(org,period_id):
     period=Period.objects.select_related('agreement__customer').get(pk=period_id,organization=org)
+    if not period.agreement_id:raise DomainError('Invoices belong to a vehicle agreement')
     lines=[{'obligation_id':o.pk,'kind':o.kind,'description':o.get_kind_display(),'amount':o.amount} for o in _billable(org,period)]
     return {'period_id':period.pk,'party_id':period.agreement.customer_id,'lines':lines,'total':sum((l['amount'] for l in lines),ZERO)}
 
@@ -29,14 +30,15 @@ def invoice_summary(invoice,today=None):
     elif invoice.due_date<today:status='overdue'
     elif paid>0:status='partially_paid'
     else:status='issued'
-    return {'amount':amount,'paid':paid,'outstanding':outstanding,'status':status,'bill_state':None if status=='void' else 'paid' if outstanding<=0 else 'outstanding'}
+    return {'amount':amount,'paid':paid,'outstanding':outstanding,'status':status,'bill_state':None if status=='void' else 'paid' if outstanding<=0 else 'owed_to_us'}  # unpaid customer invoice = money owed to the operator (M13b)
 
 @transaction.atomic
 def issue_invoice(org,user,data,key):
     """Issue one invoice for a period's customer obligations (all open ones, or the given obligation_ids). Idempotent per key."""
     existing=replay(org,'invoice',key,data,Invoice)
     if existing:return existing
-    period=Period.objects.select_for_update().select_related('agreement__customer').get(pk=data['period_id'],organization=org)
+    period=Period.objects.select_for_update(of=('self',)).select_related('agreement__customer').get(pk=data['period_id'],organization=org)
+    if not period.agreement_id:raise DomainError('Invoices belong to a vehicle agreement')
     available={o.pk:o for o in _billable(org,period).select_for_update()}
     wanted=data.get('obligation_ids') or list(available)
     if not wanted:raise DomainError('Nothing to invoice for this period')

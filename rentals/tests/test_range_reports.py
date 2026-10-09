@@ -123,7 +123,8 @@ class IncomeAgingBillStateTests(M13Base):
 
     def test_bill_state_all_three_values_on_statements_and_reports(self):
         s=services.statement(self.period)
-        self.assertEqual((s['customer']['bill_state'],s['owner']['bill_state'],s['driver']['bill_state']),('outstanding','outstanding','outstanding'))
+        self.assertEqual((s['customer']['bill_state'],s['owner']['bill_state'],s['driver']['bill_state']),('owed_to_us','outstanding','outstanding'))   # M13b: customer 30,000 unpaid = owed to us; owner 12,000 and driver 5,000 = outstanding
+        self.assertEqual(self.rep('customer-balances')['bill_states'],['owed_to_us']);self.assertEqual(self.rep('owner-liability')['bill_states'],['outstanding']);self.assertEqual(self.rep('driver-payroll')['bill_states'],['outstanding'])
         self.pay('customer_payment','30000','R-C2');self.pay('owner_payout','12000','R-O2');self.pay('driver_payout','5000','R-D2')
         s=services.statement(self.period)
         self.assertEqual((s['customer']['bill_state'],s['owner']['bill_state'],s['driver']['bill_state']),('paid','paid','paid'))
@@ -137,8 +138,8 @@ class IncomeAgingBillStateTests(M13Base):
 
     def test_invoice_bill_state(self):
         inv=self.c.post(f'{self.base}/invoices',data={'period_id':self.period.pk},content_type='application/json',HTTP_IDEMPOTENCY_KEY='inv-bs');self.assertEqual(inv.status_code,200,inv.content)
-        self.assertEqual(inv.json()['bill_state'],'outstanding')
-        self.assertEqual(self.c.get(f'{self.base}/invoices').json()['items'][0]['bill_state'],'outstanding')
+        self.assertEqual(inv.json()['bill_state'],'owed_to_us')
+        self.assertEqual(self.c.get(f'{self.base}/invoices').json()['items'][0]['bill_state'],'owed_to_us')
 
     def test_query_count_is_constant_in_periods(self):
         services.issue_period(self.org,self.agreement.pk,date(2026,10,1))

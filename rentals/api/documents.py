@@ -11,10 +11,10 @@ router = Router()
 
 # ---- documents
 @router.post('/orgs/{org_id}/documents')
-def upload(request,org_id:int,target_type:Form[str],target_id:Form[int],file:File[UploadedFile]):
+def upload(request,org_id:int,target_type:Form[str],target_id:Form[int],file:File[UploadedFile],category:Form[str]=''):
     m=membership(request,org_id,'document.upload')
     if not services.in_branch(m,target_type,target_id):raise HttpError(404,'Record not found')
-    doc=result(services.upload_document,m.organization,request.user,target_type,target_id,file.name,file.content_type,file.read(),m.role)
+    doc=result(services.upload_document,m.organization,request.user,target_type,target_id,file.name,file.content_type,file.read(),m.role,category)
     return document_dict(doc)
 
 @router.get('/orgs/{org_id}/documents')

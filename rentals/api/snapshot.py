@@ -7,6 +7,16 @@ from ._shared import membership, result
 
 router = Router()
 
+NOTICE_TEXT={'rent_issued':'Rent issued for period {period_id}','expense_posted':'Expense {expense_id} posted','payment_recorded':'Payment {payment_id} recorded','settlement_closed':'Settlement {settlement_id} closed (period {period_id})'}
+
+def notice_text(n):
+    """A readable line for the notification list instead of the raw payload."""
+    template=NOTICE_TEXT.get(n.event_type)
+    try:
+        if template:return template.format(**n.payload)
+    except (KeyError,IndexError):pass
+    return ', '.join(f'{k.replace("_"," ")} {v}' for k,v in n.payload.items()) or n.event_type.replace('_',' ').capitalize()
+
 @router.get('/orgs/{org_id}/snapshot')
 def snapshot(request,org_id:int,month:date|None=None,from_:date|None=Query(None,alias='from'),to:date|None=None,branch_id:int|None=None):
     """One month (`month`, unchanged shape) or a range: every rent period overlapping [from, to], not prorated. With a range, entries cover all those periods,
@@ -19,7 +29,7 @@ def snapshot(request,org_id:int,month:date|None=None,from_:date|None=Query(None,
     agreements=[];entries=[];closed=[];period_ids={};obligation_ids={};expense_ids={};all_periods={}
     for a in qs:
         agreement_id=f'AGR-{a.pk}'
-        agreements.append({'id':agreement_id,'vehicle':a.vehicle.model_name,'registration':a.vehicle.registration,'owner':a.vehicle.owner.name,'customer':a.customer.name,'driver':a.driver.name,'rent':float(a.customer_rent),'ownerRent':float(a.owner_rent),'salary':float(a.driver_salary),'start':a.start_date.isoformat(),'status':'Active','rules':{'fuel':a.fuel_responsible.title(),'repair':a.repair_responsible.title(),'offset':a.owner_offset_allowed}})
+        agreements.append({'id':agreement_id,'vehicle':a.vehicle.model_name,'registration':a.vehicle.registration,'owner':a.vehicle.owner.name,'customer':a.customer.name,'driver':a.driver.name if a.driver_id and a.driver_provider!='none' else None,'rent':float(a.customer_rent),'ownerRent':float(a.owner_rent),'salary':float(a.driver_salary),'start':a.start_date.isoformat(),'status':'Active','rules':{'fuel':a.fuel_responsible.title(),'repair':a.repair_responsible.title(),'offset':a.owner_offset_allowed}})
         found=list(services.overlapping_periods(Period.objects.filter(agreement=a),start,end).order_by('month')) if ranged else list(Period.objects.filter(agreement=a,month=month)[:1])
         if not found:continue
         p=found[-1]
@@ -36,5 +46,5 @@ def snapshot(request,org_id:int,month:date|None=None,from_:date|None=Query(None,
                 for row in alloc.allocations.select_related('payment').all():
                     pay=row.payment
                     entries.append({'id':f'PAY-{pay.pk}-{row.pk}','agreementId':agreement_id,'type':{'customer_payment':'Customer payment','owner_payout':'Owner payout','driver_payout':'Driver payout','salary_advance':'Salary advance'}[pay.kind],'amount':float(row.amount),'date':pay.event_date.isoformat(),'category':'Rent' if pay.kind=='customer_payment' else 'Payout','paidBy':pay.party.name if pay.kind=='customer_payment' else 'Operator','responsible':'Operator','reference':pay.reference,'description':pay.get_kind_display(),'status':'Posted'})
-    notices=[{'id':f'NT-{n.pk}','title':n.event_type.replace('_',' ').title(),'detail':str(n.payload),'date':n.created_at.date().isoformat(),'status':n.state.title(),'read':False,'recipient':n.recipient.name} for n in policies.branch_scope(m,NotificationOutbox.objects.filter(organization_id=org_id),branch_id).select_related('recipient').order_by('-id')[:200]]
+    notices=[{'id':f'NT-{n.pk}','title':n.event_type.replace('_',' ').title(),'detail':notice_text(n),'date':n.created_at.date().isoformat(),'status':n.state.title(),'read':False,'recipient':n.recipient.name} for n in policies.branch_scope(m,NotificationOutbox.objects.filter(organization_id=org_id),branch_id).select_related('recipient').order_by('-id')[:200]]
     return {'agreements':agreements,'entries':entries,'notices':notices,'closed':closed,'backend':{'orgId':org_id,'periodIds':period_ids,'obligationIds':obligation_ids,'expenseIds':expense_ids,**({'periods':all_periods} if ranged else {})}}

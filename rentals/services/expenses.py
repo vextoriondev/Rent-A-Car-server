@@ -68,6 +68,7 @@ def _prepare(org,p,data,can_override,exclude_pk=None):
     if liable not in PARTIES:raise DomainError('Unsupported responsible party')
     paid_by=data['paid_by']
     if paid_by not in PARTIES:raise DomainError('Unsupported paying party')
+    if 'driver' in (liable,paid_by) and not p.obligations.filter(kind='driver_salary').exists():raise DomainError('This agreement has no driver, so a driver cannot pay or be responsible for a cost')
     reference=data['reference'].strip()
     if not reference:raise DomainError('Reference is required')
     resolved=resolve_rule(p,category)
@@ -177,6 +178,7 @@ def record_expense(org,user,data,key,can_override=False):
     existing=replay(org,'expense',key,data,Expense)
     if existing:return existing
     p,adjusts=_target_period(org,data)
+    if not p.agreement_id:raise DomainError('Expenses are recorded on a vehicle agreement; this is a driver agreement')
     fields,resolved,overridden=_prepare(org,p,data,can_override)
     if adjusts:fields['description']=f"Late entry for {adjusts.month:%Y-%m}: {fields['description']}".strip()
     draft=bool(data.get('draft'))
@@ -189,7 +191,7 @@ def record_expense(org,user,data,key,can_override=False):
     return expense
 
 def _locked_draft(org,expense_id):
-    expense=Expense.objects.select_for_update().select_related('period').get(pk=expense_id,period__organization=org)
+    expense=Expense.objects.select_for_update(of=('self',)).select_related('period').get(pk=expense_id,period__organization=org)
     if expense.state!=Expense.State.DRAFT:raise DomainError('Only drafts can be changed; posted entries are corrected by reversal')
     return expense,locked_period(org,expense.period_id)
 
@@ -229,7 +231,7 @@ def discard_draft(org,user,expense_id):
 
 @transaction.atomic
 def approve_expense(org,user,expense_id):
-    expense=Expense.objects.select_for_update().select_related('period','period__agreement','period__agreement__vehicle__owner').get(pk=expense_id,period__organization=org)
+    expense=Expense.objects.select_for_update(of=('self',)).select_related('period','period__agreement','period__agreement__vehicle__owner').get(pk=expense_id,period__organization=org)
     locked_period(org,expense.period_id)
     before=snap(expense,EXP_FIELDS)
     posted=post_expense_locked(expense,user)
@@ -241,7 +243,7 @@ def approve_expense(org,user,expense_id):
 def reverse_expense(org,user,expense_id,reason):
     """The original keeps its amount and links to a mirror-image journal entry; balances are derived from POSTED rows only."""
     if not reason.strip():raise DomainError('Reversal reason is required')
-    expense=Expense.objects.select_for_update().select_related('period').get(pk=expense_id,period__organization=org)
+    expense=Expense.objects.select_for_update(of=('self',)).select_related('period').get(pk=expense_id,period__organization=org)
     locked_period(org,expense.period_id)
     if expense.state!=Expense.State.POSTED:raise DomainError('Only posted expenses can be reversed')
     before=snap(expense,EXP_FIELDS)

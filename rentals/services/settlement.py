@@ -55,8 +55,12 @@ def exceptions_for(period):
             if any(ps[side]['due']!=0 for side in('customer','owner','driver')):out.append({'code':'prior_period_balance','severity':WARNING,'message':f'{prev:%Y-%m} closed with a balance that was not carried forward','ref':str(prior.pk)})
     return out
 
+def _vehicle_only(period):
+    if not period.agreement_id:raise DomainError('Month-end closing applies to a vehicle agreement; a driver agreement is paid month by month')
+
 def preview_settlement(org,period_id):
     period=Period.objects.select_related('agreement','organization').get(pk=period_id,organization=org)
+    _vehicle_only(period)
     ex=exceptions_for(period)
     return {'period_id':period.pk,'statement':statement(period),'exceptions':ex,'ready':not any(e['severity']==BLOCKING for e in ex)}
 
@@ -86,7 +90,7 @@ def _hash(period):
 
 def _lock(org,settlement_id):
     s=Settlement.objects.get(pk=settlement_id,organization=org)
-    period=Period.objects.select_for_update().select_related('agreement','organization').get(pk=s.period_id)
+    period=Period.objects.select_for_update(of=('self',)).select_related('agreement','organization').get(pk=s.period_id)
     return Settlement.objects.select_for_update().get(pk=s.pk),period
 
 def _blocking(period):
@@ -96,7 +100,8 @@ def _blocking(period):
 @transaction.atomic
 def prepare_settlement(org,user,period_id):
     """Create (or return) the draft settlement for a period. Idempotent."""
-    period=Period.objects.select_for_update().select_related('agreement').get(pk=period_id,organization=org)
+    period=Period.objects.select_for_update(of=('self',)).select_related('agreement').get(pk=period_id,organization=org)
+    _vehicle_only(period)
     s,created=Settlement.objects.get_or_create(period=period,defaults={'organization':org,'agreement':period.agreement,'month':period.month,'state':Settlement.State.CLOSED if period.closed_at else Settlement.State.DRAFT,'prepared_by':user,'prepared_at':timezone.now()})
     if created:audit(org,user,'settlement.prepare','settlement',s.pk,after={'state':s.state,'month':s.month})
     return s
@@ -161,6 +166,7 @@ def close_period(org,user,period_id):
     """The frontend's single-button close: prepare -> request -> approve (shortcut, no role check beyond the caller's close permission) -> close.
     Idempotent. Legacy error messages are preserved."""
     period=Period.objects.get(pk=period_id,organization=org)
+    _vehicle_only(period)
     if period.closed_at:return period
     with transaction.atomic():
         s=prepare_settlement(org,user,period_id)

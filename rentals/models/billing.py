@@ -10,17 +10,20 @@ class Charge(models.Model):
     class Kind(models.TextChoices):
         CHARGE='charge','Charge'; CREDIT='credit','Credit'; ADJUSTMENT='adjustment','Adjustment'; REIMBURSEMENT='reimbursement','Reimbursement'; EXPENSE_FRONT='expense_front','Expense paid by a third party'
         OPENING='opening_balance','Opening balance'; CARRY_OUT='carry_out','Carried forward'
+        OVERTIME='overtime','Overtime'; ABSENCE='absence_deduction','Absence deduction'; FINE='fine','Fine'
     class Direction(models.TextChoices): INCREASE='increase','Increase'; DECREASE='decrease','Decrease'
     organization = models.ForeignKey(Organization,on_delete=models.CASCADE)
     kind = models.CharField(max_length=20,choices=Kind.choices)
     direction = models.CharField(max_length=10,choices=Direction.choices)
     side = models.CharField(max_length=10)
     party = models.ForeignKey(Party,on_delete=models.PROTECT)
-    agreement = models.ForeignKey(Agreement,on_delete=models.PROTECT)
+    agreement = models.ForeignKey(Agreement,null=True,blank=True,on_delete=models.PROTECT)
     period = models.ForeignKey(Period,on_delete=models.PROTECT,related_name='charges')
     amount = models.DecimalField(max_digits=14,decimal_places=2)
     description = models.CharField(max_length=240,blank=True)
     reference = models.CharField(max_length=120,blank=True)
+    quantity = models.DecimalField(max_digits=10,decimal_places=2,null=True,blank=True,help_text='Hours, days or other units behind an overtime or absence amount')
+    unit_rate = models.DecimalField(max_digits=14,decimal_places=2,null=True,blank=True)
     obligation = models.OneToOneField(Obligation,null=True,blank=True,on_delete=models.PROTECT,related_name='charge')
     source_type = models.CharField(max_length=30,blank=True)
     source_id = models.CharField(max_length=60,blank=True)

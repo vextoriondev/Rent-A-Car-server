@@ -92,3 +92,27 @@ def update_member(org,actor,member_id,role=None,branch_id=None,clear_branch=Fals
     target.save()
     audit(org,actor,'member.update','membership',target.pk,before=before,after={'role':target.role,'branch_id':target.branch_id})
     return target
+
+def mask_id(value):
+    """Last four characters only; short values are fully hidden."""
+    return '*'*(len(value)-4)+value[-4:] if len(value)>4 else ('*'*len(value))
+
+def party_ids(org,party_id,actor,full):
+    """Protected identity numbers; every read is logged and the audit keeps no value."""
+    party=Party.objects.get(pk=party_id,organization=org)
+    audit(org,actor,'sensitive.read','party_ids',party.pk,after={'masked':not full})
+    nid,lic=party.nid_number,party.driving_licence_number
+    return {'party_id':party.pk,'nid_number':nid if full else mask_id(nid),'driving_licence_number':lic if full else mask_id(lic),'masked':not full}
+
+def set_party_ids(org,party_id,data,actor):
+    """Admin only (enforced by the policy action). Only the fields sent change; the audit stores masked values."""
+    party=Party.objects.get(pk=party_id,organization=org)
+    before={'nid_number':mask_id(party.nid_number),'driving_licence_number':mask_id(party.driving_licence_number)}
+    for field in('nid_number','driving_licence_number'):
+        if data.get(field) is not None:
+            value=data[field].strip()
+            if len(value)>40:raise DomainError('An identity number may have at most 40 characters')
+            setattr(party,field,value)
+    party.save(update_fields=['nid_number','driving_licence_number'])
+    audit(org,actor,'party.ids_update','party',party.pk,before=before,after={'nid_number':mask_id(party.nid_number),'driving_licence_number':mask_id(party.driving_licence_number)})
+    return party

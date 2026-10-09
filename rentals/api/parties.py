@@ -3,7 +3,7 @@ from ninja import Router
 from ninja.errors import HttpError
 from .. import policies, services
 from ..models import Branch, Membership, Party, Vehicle
-from ._shared import PartyIn, PartyPatch, VehicleIn, ConsentIn, ContactIn, AccessIn, BranchIn, MemberPatch, membership, pick_branch, result, party_dict, paginate
+from ._shared import PartyIn, PartyPatch, VehicleIn, ConsentIn, ContactIn, AccessIn, BranchIn, MemberPatch, IdsIn, membership, pick_branch, result, party_dict, paginate
 
 router = Router()
 
@@ -44,6 +44,18 @@ def create_vehicle(request,org_id:int,payload:VehicleIn):
 def update_party(request,org_id:int,party_id:int,payload:PartyPatch):
     m=membership(request,org_id,'party.write',party=party_id)
     return party_dict(result(services.update_party,m.organization,party_id,payload.dict(),request.user))
+
+@router.get('/orgs/{org_id}/parties/{party_id}/ids')
+def get_ids(request,org_id:int,party_id:int):
+    """NID and licence numbers: full for an administrator, last four characters for the finance roles, 403 for everyone else. Always logged."""
+    m=membership(request,org_id,'party.ids_masked',party=party_id)
+    return result(services.party_ids,m.organization,party_id,request.user,policies.can(m.role,'party.read_ids'))
+
+@router.put('/orgs/{org_id}/parties/{party_id}/ids')
+def put_ids(request,org_id:int,party_id:int,payload:IdsIn):
+    m=membership(request,org_id,'party.read_ids',party=party_id)
+    result(services.set_party_ids,m.organization,party_id,payload.dict(),request.user)
+    return result(services.party_ids,m.organization,party_id,request.user,True)
 
 @router.put('/orgs/{org_id}/parties/{party_id}/consent')
 def set_consent(request,org_id:int,party_id:int,payload:ConsentIn):

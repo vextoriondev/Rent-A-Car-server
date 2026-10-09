@@ -29,20 +29,20 @@ def create_agreement(request,org_id:int,payload:AgreementIn):
     membership(request,org_id,'agreement.write',vehicle=payload.vehicle_id)
     vehicle=Vehicle.objects.filter(pk=payload.vehicle_id,organization_id=org_id).select_related('owner').first()
     customer=Party.objects.filter(pk=payload.customer_id,organization_id=org_id,kind=Party.Kind.CUSTOMER).first()
-    driver=Party.objects.filter(pk=payload.driver_id,organization_id=org_id,kind=Party.Kind.DRIVER).first()
-    if not all([vehicle,customer,driver]):raise HttpError(422,'Vehicle, customer or driver is invalid')
+    driver=Party.objects.filter(pk=payload.driver_id,organization_id=org_id,kind=Party.Kind.DRIVER).first() if payload.driver_id else None
+    if not all([vehicle,customer]) or (payload.driver_id and not driver):raise HttpError(422,'Vehicle, customer or driver is invalid')
     a,warnings=create_checked(request,org_id,Agreement(organization_id=org_id,**payload.dict()))
     return {**agreement_dict(Agreement.objects.select_related('vehicle__owner','customer','driver').get(pk=a.pk)),'warnings':warnings}
 
 @router.post('/orgs/{org_id}/agreements/quick')
 def quick_agreement(request,org_id:int,payload:QuickAgreementIn):
     m=membership(request,org_id,'agreement.write')
-    if not all(x.strip() for x in [payload.customer,payload.owner,payload.driver,payload.vehicle,payload.registration]):raise HttpError(422,'All parties and vehicle details are required')
+    if not all(x.strip() for x in [payload.customer,payload.owner,payload.vehicle,payload.registration]) or (payload.driver_provider!='none' and not payload.driver.strip()):raise HttpError(422,'All parties and vehicle details are required')
     with transaction.atomic():
         if Vehicle.objects.filter(organization_id=org_id,registration__iexact=payload.registration.strip()).exists():raise HttpError(409,'Registration already exists; use the existing vehicle in the full agreement API')
         owner=Party.objects.create(organization_id=org_id,kind='owner',name=payload.owner.strip(),created_by=request.user)
         customer=Party.objects.create(organization_id=org_id,kind='customer',name=payload.customer.strip(),created_by=request.user)
-        driver=Party.objects.create(organization_id=org_id,kind='driver',name=payload.driver.strip(),created_by=request.user)
+        driver=Party.objects.create(organization_id=org_id,kind='driver',name=payload.driver.strip(),created_by=request.user) if payload.driver_provider!='none' else None
         vehicle=Vehicle.objects.create(organization_id=org_id,registration=payload.registration.strip(),model_name=payload.vehicle.strip(),owner=owner,branch=pick_branch(m))
         a=Agreement(organization_id=org_id,vehicle=vehicle,customer=customer,driver=driver,start_date=payload.start,customer_rent=result(services.bd,payload.rent),owner_rent=result(services.bd,payload.owner_rent),driver_salary=Decimal('0.00') if payload.salary==0 else result(services.bd,payload.salary),fuel_responsible=payload.fuel.lower(),repair_responsible=payload.repair.lower(),owner_offset_allowed=payload.offset,driver_provider=payload.driver_provider,driver_paid_by=payload.driver_paid_by,clauses=payload.clauses.strip())
         a,warnings=create_checked(request,org_id,a)
@@ -61,7 +61,7 @@ def periods(request,org_id:int,month:date|None=None,from_:date|None=Query(None,a
     if month:qs=qs.filter(month=month)
     start,end=result(services.resolve_range,from_,to)
     qs=services.overlapping_periods(qs,start,end)  # every period that overlaps the range, not prorated
-    return paginate(qs.order_by('-month','agreement_id'),limit,offset,lambda p:{'id':p.pk,'agreement_id':p.agreement_id,'month':p.month.isoformat(),'closed':bool(p.closed_at)})
+    return paginate(qs.order_by('-month','agreement_id'),limit,offset,lambda p:{'id':p.pk,'agreement_id':p.agreement_id,'driver_agreement_id':p.driver_agreement_id,'month':p.month.isoformat(),'closed':bool(p.closed_at)})
 
 @router.get('/orgs/{org_id}/periods/{period_id}/statement')
 def statement(request,org_id:int,period_id:int):

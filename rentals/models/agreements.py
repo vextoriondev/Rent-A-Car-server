@@ -7,7 +7,7 @@ class Agreement(models.Model):
     organization = models.ForeignKey(Organization,on_delete=models.CASCADE)
     vehicle = models.ForeignKey(Vehicle,on_delete=models.PROTECT)
     customer = models.ForeignKey(Party,on_delete=models.PROTECT,related_name='customer_agreements')
-    driver = models.ForeignKey(Party,on_delete=models.PROTECT,related_name='driver_agreements')
+    driver = models.ForeignKey(Party,null=True,blank=True,on_delete=models.PROTECT,related_name='driver_agreements',help_text='Null for a vehicle-only agreement (driver_provider none); that driver, if any, is on a separate driver agreement')
     branch = models.ForeignKey('rentals.Branch',null=True,blank=True,on_delete=models.PROTECT,related_name='agreements',help_text='Always equals the vehicle branch')
     start_date = models.DateField()
     end_date = models.DateField(null=True,blank=True)
@@ -17,7 +17,7 @@ class Agreement(models.Model):
     fuel_responsible = models.CharField(max_length=12,choices=[('owner','Owner'),('customer','Customer'),('operator','Operator'),('driver','Driver')],default='owner')
     repair_responsible = models.CharField(max_length=12,choices=[('owner','Owner'),('customer','Customer'),('operator','Operator'),('driver','Driver')],default='owner')
     owner_offset_allowed = models.BooleanField(default=False)
-    driver_provider = models.CharField(max_length=10,default='operator')  # who supplies the driver: operator | owner | customer
+    driver_provider = models.CharField(max_length=10,default='operator')  # who supplies the driver: operator | owner | customer | none (vehicle only)
     driver_paid_by = models.CharField(max_length=10,default='operator')  # who pays the driver's salary; only 'operator' creates a payable
     clauses = models.TextField(blank=True)  # free-text agreement clauses agreed with the customer
     status = models.CharField(max_length=10,choices=[('draft','Draft'),('active','Active'),('ended','Ended')],default='active')
@@ -30,18 +30,21 @@ class Agreement(models.Model):
 
 class Period(models.Model):
     organization = models.ForeignKey(Organization,on_delete=models.CASCADE)
-    agreement = models.ForeignKey(Agreement,on_delete=models.PROTECT)
+    agreement = models.ForeignKey(Agreement,null=True,blank=True,on_delete=models.PROTECT,help_text='Null on a standalone driver-agreement period')
+    driver_agreement = models.ForeignKey('rentals.DriverAgreement',null=True,blank=True,on_delete=models.PROTECT,related_name='periods')
     month = models.DateField(help_text='First day of month')
     agreement_version = models.ForeignKey('rentals.AgreementVersion',null=True,blank=True,on_delete=models.PROTECT,related_name='periods')
     closed_at = models.DateTimeField(null=True,blank=True)
     closed_by = models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.PROTECT,null=True,blank=True)
-    class Meta: constraints=[models.UniqueConstraint(fields=['agreement','month'],name='unique_agreement_month')]
+    class Meta: constraints=[models.UniqueConstraint(fields=['agreement','month'],name='unique_agreement_month'),models.UniqueConstraint(fields=['driver_agreement','month'],name='unique_driver_agreement_month'),
+        models.CheckConstraint(condition=(models.Q(agreement__isnull=False,driver_agreement__isnull=True)|models.Q(agreement__isnull=True,driver_agreement__isnull=False)),name='period_has_exactly_one_agreement')]
 
 class Obligation(models.Model):
     class Kind(models.TextChoices):
         CUSTOMER='customer_rent','Customer rent'; OWNER='owner_rent','Owner rent'; DRIVER='driver_salary','Driver salary'
         CHARGE='charge','Charge'; CREDIT='credit','Credit'; ADJUSTMENT='adjustment','Adjustment'; REIMBURSEMENT='reimbursement','Reimbursement'; EXPENSE_FRONT='expense_front','Expense paid by a third party'
         OPENING='opening_balance','Opening balance'; CARRY_OUT='carry_out','Carried forward'
+        OVERTIME='overtime','Overtime'; ABSENCE='absence_deduction','Absence deduction'; FINE='fine','Fine'
     period = models.ForeignKey(Period,on_delete=models.PROTECT,related_name='obligations')
     kind = models.CharField(max_length=20,choices=Kind.choices)
     party = models.ForeignKey(Party,on_delete=models.PROTECT)

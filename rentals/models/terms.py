@@ -41,6 +41,8 @@ class AgreementVersion(models.Model):
     driver_provider = models.CharField(max_length=10,default='operator')
     driver_paid_by = models.CharField(max_length=10,default='operator')
     clauses = models.TextField(blank=True)
+    overtime_rate = models.DecimalField(max_digits=14,decimal_places=2,null=True,blank=True,help_text='Customer overtime rate per unit; suggested when posting overtime')
+    overtime_unit = models.CharField(max_length=20,blank=True,help_text='hour, day, km ...')
     billing_cadence = models.CharField(max_length=10,choices=Cadence.choices,default=Cadence.MONTHLY)
     payout_cadence = models.CharField(max_length=10,choices=Cadence.choices,default=Cadence.MONTHLY)
     approval_threshold = models.DecimalField(max_digits=14,decimal_places=2,default=Decimal('5000.00'))

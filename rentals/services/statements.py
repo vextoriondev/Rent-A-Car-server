@@ -9,11 +9,11 @@ from .helpers import ZERO, total
 
 BILL={'obligation','charge'}
 PAY={'payment','payment_advance'}
-MARGIN_KINDS={'customer_rent','owner_rent','driver_salary','charge','credit','adjustment'}
+MARGIN_KINDS={'customer_rent','owner_rent','driver_salary','charge','credit','adjustment','overtime','absence_deduction','fine'}
 
 def customer_bill_state(due):
-    """paid = nothing left to collect (an overpayment also counts as paid); outstanding = the customer still owes us."""
-    return 'outstanding' if due>0 else 'paid'
+    """paid = nothing left to collect (an overpayment also counts as paid); owed_to_us = the customer still owes the operator (M13b, D4)."""
+    return 'owed_to_us' if due>0 else 'paid'
 
 def payable_bill_state(due):
     """Owner or driver side: outstanding = we owe them; owed_to_us = they owe the operator (negative due); paid = zero."""

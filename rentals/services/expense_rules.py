@@ -8,7 +8,7 @@ from .expenses import ensure_categories, PARTIES
 
 @transaction.atomic
 def set_expense_rule(org,user,version_id,category,*,responsible,first_payer='operator',reimbursable=True,deductible_from='none',approval_threshold=None,proof_required=False,notify_parties=True):
-    version=AgreementVersion.objects.select_for_update().select_related('agreement').get(pk=version_id,agreement__organization=org)
+    version=AgreementVersion.objects.select_for_update(of=('self',)).select_related('agreement').get(pk=version_id,agreement__organization=org)
     if version.periods.exists():raise DomainError('Periods were already issued under this version; revise the agreement to change rules')
     ensure_categories(org)
     if not ExpenseCategory.objects.filter(organization=org,code=category,active=True).exists():raise DomainError('Unsupported expense category')

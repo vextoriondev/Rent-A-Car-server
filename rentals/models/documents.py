@@ -31,6 +31,7 @@ class Document(models.Model):
     content_type = models.CharField(max_length=60)
     size = models.PositiveIntegerField()
     sha256 = models.CharField(max_length=64)
+    category = models.CharField(max_length=20,blank=True,help_text="'identity' = NID or licence scan, visible to admins only")
     uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.PROTECT,related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
     class Meta: indexes=[models.Index(fields=['organization','target_type','target_id'])]

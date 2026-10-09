@@ -55,32 +55,41 @@ def journal(org,source_type,source_id,lines,period=None):
     for l in lines:
         party=l[3] if len(l)>3 else None
         p=l[4] if len(l)>4 and l[4] is not None else period
-        rows.append(JournalLine(entry=entry,account=l[0],account_ref=accounts[l[0]],debit=l[1],credit=l[2],party=party,period=p,agreement_id=p.agreement_id if p else None,vehicle_id=p.agreement.vehicle_id if p else None))
+        rows.append(JournalLine(entry=entry,account=l[0],account_ref=accounts[l[0]],debit=l[1],credit=l[2],party=party,period=p,agreement_id=p.agreement_id if p else None,vehicle_id=_vehicle_id(p)))
     JournalLine.objects.bulk_create(rows)
     return entry
+
+def _vehicle_id(p):
+    if not p:return None
+    return p.agreement.vehicle_id if p.agreement_id else p.driver_agreement.vehicle_id
 
 def period_parties(period):
     """Customer, owner and driver parties the period was issued with (the obligations carry them, so history survives reassignment)."""
     by_kind={o.kind:o.party for o in period.obligations.select_related('party').filter(kind__in=['customer_rent','owner_rent','driver_salary'])}
-    return {'customer':by_kind.get('customer_rent') or period.agreement.customer,'owner':by_kind['owner_rent'],'driver':by_kind['driver_salary']}
+    return {'customer':by_kind.get('customer_rent') or (period.agreement.customer if period.agreement_id else None),'owner':by_kind.get('owner_rent'),'driver':by_kind.get('driver_salary')}  # a side is None when the agreement has none (vehicle only, or a driver agreement)
 
 def notice(org,event_key,party,event_type,payload):
     NotificationOutbox.objects.get_or_create(organization=org,event_key=event_key,recipient=party,defaults={'event_type':event_type,'payload':payload})
 
 def validate_agreement(agreement):
     org=agreement.organization_id
-    if agreement.vehicle.organization_id!=org or agreement.vehicle.owner.organization_id!=org or agreement.customer.organization_id!=org or agreement.driver.organization_id!=org:raise DomainError('Agreement relationships must belong to the organization')
-    if agreement.vehicle.owner.kind!='owner' or agreement.customer.kind!='customer' or agreement.driver.kind!='driver':raise DomainError('Party roles do not match agreement')
+    if agreement.vehicle.organization_id!=org or agreement.vehicle.owner.organization_id!=org or agreement.customer.organization_id!=org or (agreement.driver_id and agreement.driver.organization_id!=org):raise DomainError('Agreement relationships must belong to the organization')
+    if agreement.vehicle.owner.kind!='owner' or agreement.customer.kind!='customer' or (agreement.driver_id and agreement.driver.kind!='driver'):raise DomainError('Party roles do not match agreement')
     if agreement.end_date and agreement.end_date<agreement.start_date:raise DomainError('End date precedes start date')
     if agreement.branch_id is None:agreement.branch_id=agreement.vehicle.branch_id
     if agreement.branch_id!=agreement.vehicle.branch_id:raise DomainError("An agreement must be in the same branch as its vehicle")
     clash=Agreement.objects.filter(vehicle_id=agreement.vehicle_id,active=True).exclude(pk=agreement.pk).filter(Q(end_date__isnull=True)|Q(end_date__gte=agreement.start_date))
     if agreement.end_date:clash=clash.filter(start_date__lte=agreement.end_date)
     if clash.exists():raise DomainError('Vehicle has an overlapping active agreement')
-    if agreement.driver_provider not in('operator','owner','customer') or agreement.driver_paid_by not in('operator','owner','customer'):raise DomainError('The driver provider and the party paying the driver must each be operator, owner or customer')
-    if any(x<=0 for x in [agreement.customer_rent,agreement.owner_rent]) or agreement.driver_salary<0 or (agreement.driver_paid_by=='operator' and agreement.driver_salary<=0):raise DomainError('Monthly terms must be positive')
+    if agreement.driver_provider=='none':
+        if agreement.driver_id or agreement.driver_salary!=0:raise DomainError('A vehicle-only agreement has no driver and no salary; the driver is on a separate driver agreement')
+    else:
+        if agreement.driver_provider not in('operator','owner','customer') or agreement.driver_paid_by not in('operator','owner','customer'):raise DomainError('The driver provider and the party paying the driver must each be operator, owner, customer or none (no driver)')
+        if not agreement.driver_id:raise DomainError('This agreement needs a driver; choose "no driver" for a vehicle-only agreement')
+    if any(x<=0 for x in [agreement.customer_rent,agreement.owner_rent]) or agreement.driver_salary<0 or (agreement.driver_provider!='none' and agreement.driver_paid_by=='operator' and agreement.driver_salary<=0):raise DomainError('Monthly terms must be positive')
 
 def locked_period(org,period_id):
-    period=Period.objects.select_for_update().select_related('agreement','agreement__vehicle','agreement__customer','agreement__driver','agreement__vehicle__owner').get(pk=period_id,organization=org)
+    period=Period.objects.select_for_update(of=('self',)).select_related('agreement','agreement__vehicle','agreement__customer','agreement__driver','agreement__vehicle__owner').get(pk=period_id,organization=org)
     if period.closed_at: raise DomainError('Period is closed; use an authorized adjustment workflow')
+    if not period.agreement_id:raise DomainError('Expenses are recorded on a vehicle agreement; this is a driver agreement')
     return period

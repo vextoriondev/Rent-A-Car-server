@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 from ninja import Router
 from ninja.errors import HttpError
 from .. import policies, services
@@ -16,7 +17,14 @@ def accounts(request,org_id:int):
 @router.post('/orgs/{org_id}/charges')
 def post_charge(request,org_id:int,payload:ChargeIn):
     m=membership(request,org_id,'charge.post',period=payload.period_id)
-    return charge_dict(result(services.post_charge,m.organization,request.user,payload.dict(),request.headers.get('Idempotency-Key','')))
+    return charge_dict(result(services.post_charge,m.organization,request.user,payload.dict(),request.headers.get('Idempotency-Key',''),can_approve=m.role=='admin'))
+
+@router.get('/orgs/{org_id}/periods/{period_id}/charge-suggestion')
+def charge_suggestion(request,org_id:int,period_id:int,kind:str,quantity:Decimal=Decimal('1')):
+    m=membership(request,org_id,'charge.post',period=period_id)
+    p=Period.objects.select_related('agreement','agreement_version').filter(pk=period_id,organization=m.organization).first()
+    if not p:raise HttpError(404,'Period not found')
+    return money_dict(result(services.charge_suggestion,p,kind,quantity))
 
 @router.get('/orgs/{org_id}/charges')
 def charges(request,org_id:int,period_id:int|None=None,branch_id:int|None=None,limit:int=100,offset:int=0):

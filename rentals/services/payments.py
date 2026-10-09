@@ -16,7 +16,7 @@ def record_payment(org,user,data,key):
     if sum((bd(row['amount']) for row in allocations),ZERO)!=amount:raise DomainError('Allocations must equal the payment amount')
     ids=[row['obligation_id'] for row in allocations]
     if len(ids)!=len(set(ids)):raise DomainError('Duplicate obligation allocation')
-    obligations=list(Obligation.objects.select_for_update().select_related('period','party').filter(pk__in=ids,period__organization=org).order_by('pk'))
+    obligations=list(Obligation.objects.select_for_update(of=('self',)).select_related('period','party').filter(pk__in=ids,period__organization=org).order_by('pk'))
     if len(obligations)!=len(ids):raise DomainError('Obligation does not exist in this organization')
     side={'customer_payment':'customer','owner_payout':'owner','driver_payout':'driver','salary_advance':'driver'}[kind]
     party_id=obligations[0].party_id

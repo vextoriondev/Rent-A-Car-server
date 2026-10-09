@@ -19,11 +19,13 @@ ROLE_ACTIONS: dict[str,set[str]] = {
     'sensitive':FINANCE,                            # consent, contacts, logins, other parties' terms
     # concrete endpoint actions (same roles the pre-M1 membership() tuples allowed)
     'party.write':{'admin','accountant','operations'},
+    'party.read_ids':{'admin'},                     # full NID and licence numbers and identity scans (M16)
+    'party.ids_masked':FINANCE,                     # last four characters only
     'vehicle.write':{'admin','operations'},
     'agreement.write':{'admin','accountant','operations'},
     'expense.record':{'admin','accountant','operations'},
     'period.issue':FINANCE,'expense.approve':FINANCE,'expense.reverse':FINANCE,'payment.post':FINANCE,
-    'period.close':FINANCE,'notice.retry':FINANCE,'snapshot.read':FINANCE,
+    'period.close':FINANCE,'notice.retry':FINANCE,'snapshot.read':ORG_WIDE_ROLES,
     'agreement.revise':FINANCE,'ownership.transfer':FINANCE,'driver.assign':{'admin','accountant','operations'},
     'expense.override':FINANCE,'rules.write':FINANCE,'category.write':{'admin'},
     'charge.post':FINANCE,'invoice.issue':FINANCE,'ledger.read':{'admin','accountant','viewer'},
@@ -51,15 +53,19 @@ def effective_branch(member,requested=None):
     return limited_branch(member) or requested
 
 def _branch_paths():
-    from .models import Vehicle, Agreement, AgreementVersion, Period, Obligation, Expense, Charge, Invoice, Settlement, MaintenanceCase
-    return {Vehicle:'branch',Agreement:'branch',AgreementVersion:'agreement__branch',Period:'agreement__branch',Obligation:'period__agreement__branch',Expense:'period__agreement__branch',
-        Charge:'agreement__branch',Invoice:'period__agreement__branch',Settlement:'agreement__branch',MaintenanceCase:'vehicle__branch'}
+    from .models import Vehicle, Agreement, AgreementVersion, DriverAgreement, Period, Obligation, Expense, Charge, Invoice, Settlement, MaintenanceCase
+    return {DriverAgreement:'branch',Vehicle:'branch',Agreement:'branch',AgreementVersion:'agreement__branch',Expense:'period__agreement__branch',
+        Invoice:'period__agreement__branch',Settlement:'agreement__branch',MaintenanceCase:'vehicle__branch'}
+
+def period_in_branch(prefix,branch):
+    """A period sits in its vehicle agreement's branch or, for a standalone driver agreement, in that agreement's branch."""
+    return Q(**{f'{prefix}agreement__branch_id':branch})|Q(**{f'{prefix}driver_agreement__branch_id':branch})
 
 def branch_parties(user_id,branch_id):
     """Parties a branch may see: those on its agreements or vehicles, plus unlinked ones the user created (so a new party can be picked before its first agreement)."""
-    from .models import Party, Vehicle, Agreement
-    linked=Q(pk__in=Agreement.objects.filter(branch_id=branch_id).values('customer_id'))|Q(pk__in=Agreement.objects.filter(branch_id=branch_id).values('driver_id'))|Q(pk__in=Vehicle.objects.filter(branch_id=branch_id).values('owner_id'))
-    anywhere=Q(pk__in=Agreement.objects.values('customer_id'))|Q(pk__in=Agreement.objects.values('driver_id'))|Q(pk__in=Vehicle.objects.values('owner_id'))
+    from .models import Party, Vehicle, Agreement, DriverAgreement
+    linked=Q(pk__in=DriverAgreement.objects.filter(branch_id=branch_id).values('driver_id'))|Q(pk__in=Agreement.objects.filter(branch_id=branch_id).values('customer_id'))|Q(pk__in=Agreement.objects.filter(branch_id=branch_id,driver_id__isnull=False).values('driver_id'))|Q(pk__in=Vehicle.objects.filter(branch_id=branch_id).values('owner_id'))
+    anywhere=Q(pk__in=DriverAgreement.objects.values('driver_id'))|Q(pk__in=Agreement.objects.values('customer_id'))|Q(pk__in=Agreement.objects.filter(driver_id__isnull=False).values('driver_id'))|Q(pk__in=Vehicle.objects.values('owner_id'))
     return Party.objects.filter(linked|(Q(created_by_id=user_id)&~anywhere)).values('pk')
 
 def branch_scope(member,qs,branch_id=None):
@@ -69,7 +75,11 @@ def branch_scope(member,qs,branch_id=None):
     if not branch:return qs
     model=qs.model
     if model is Party:return qs.filter(pk__in=branch_parties(member.user_id,branch))
-    if model is Payment:return qs.filter(pk__in=Allocation.objects.filter(obligation__period__agreement__branch_id=branch).values('payment_id'))
+    from .models import Period, Obligation, Charge
+    if model is Period:return qs.filter(period_in_branch('',branch))
+    if model is Obligation:return qs.filter(period_in_branch('period__',branch))
+    if model is Charge:return qs.filter(period_in_branch('period__',branch))
+    if model is Payment:return qs.filter(pk__in=Allocation.objects.filter(period_in_branch('obligation__period__',branch)).values('payment_id'))
     if model is NotificationOutbox:return qs.filter(recipient_id__in=branch_parties(member.user_id,branch))
     path=_branch_paths().get(model)
     return qs.filter(**{path:branch}) if path else qs

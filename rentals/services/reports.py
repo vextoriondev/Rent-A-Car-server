@@ -8,6 +8,7 @@ from decimal import Decimal
 from django.db.models import CharField, Count, Exists, OuterRef, Sum
 from django.db.models.functions import Cast
 from ..models import Allocation, Document, ExpenseCategory, Expense, Obligation, Payment, Period
+from ..policies import period_in_branch
 from .helpers import ZERO, DomainError
 from .ranges import entry_dates, overlapping_periods, resolve_range, as_date
 from .statements import bulk_ledger_statements
@@ -24,6 +25,7 @@ PERIOD_REPORTS={
     'cash-movement':{'title':'Cash movement','party':'Customer','columns':['Receipts','Owner paid','Driver paid','Net cash'],'values':lambda s:[s['customer']['received'],s['owner']['paid'],s['driver']['paid'],s['operator']['recorded_cash_movement']]},
 }
 OTHER_REPORTS={'cost-by-responsible':'Cost by responsible party','customer-aging':'Customer aging','missing-receipts':'Missing receipts','entries':'Entries','daily-expenses':'Daily expenses','category-by-vehicle':'Cost category by vehicle'}
+DRIVER_REPORTS={'driver-payroll','cash-movement'}   # reports that include standalone driver agreements
 BILL_SIDE={'customer-balances':'customer','owner-liability':'owner','driver-payroll':'driver'}
 REPORT_TYPES=list(PERIOD_REPORTS)+list(OTHER_REPORTS)
 AGING_BUCKETS=[('Current',0),('1-30 days',30),('31-60 days',60),('61-90 days',90),('Over 90 days',None)]
@@ -34,8 +36,8 @@ def _page(rows,limit,offset):
     return rows[offset:offset+limit],(offset+limit if offset+limit<len(rows) else None)
 
 def _periods(org,f):
-    qs=Period.objects.filter(organization=org).select_related('agreement__vehicle','agreement__customer')
-    if f.get('branch_id'):qs=qs.filter(agreement__branch_id=f['branch_id'])
+    qs=Period.objects.filter(organization=org).select_related('agreement__vehicle','agreement__customer','driver_agreement__vehicle','driver_agreement__driver')
+    if f.get('branch_id'):qs=qs.filter(period_in_branch('',f['branch_id']))
     if f.get('month'):qs=qs.filter(month=f['month'])
     if f.get('month_from'):qs=qs.filter(month__gte=f['month_from'])
     if f.get('month_to'):qs=qs.filter(month__lte=f['month_to'])
@@ -47,9 +49,16 @@ def _periods(org,f):
     if f.get('driver_id'):qs=qs.filter(obligations__kind='driver_salary',obligations__party_id=f['driver_id'])
     return qs.order_by('-month','agreement_id')
 
+def period_ref(p):
+    return f'AGR-{p.agreement_id}' if p.agreement_id else f'DRV-{p.driver_agreement_id}'
+
+def _period_vehicle(p):
+    v=p.agreement.vehicle if p.agreement_id else p.driver_agreement.vehicle
+    return v.registration if v else ''
+
 def _parties(periods):
     """{period_id: {'customer','owner','driver'}} names from the obligations the period was issued with (one query)."""
-    out={p.pk:{'customer':p.agreement.customer.name,'owner':'','driver':''} for p in periods}
+    out={p.pk:{'customer':p.agreement.customer.name if p.agreement_id else '','owner':'','driver':''} for p in periods}
     for o in Obligation.objects.filter(period__in=periods,kind__in=['owner_rent','driver_salary']).select_related('party'):
         out[o.period_id]['owner' if o.kind=='owner_rent' else 'driver']=o.party.name
     return out
@@ -70,14 +79,17 @@ def run_report(org,rtype,filters=None,limit=100,offset=0,as_of=None):
     raise DomainError('Unknown report')
 
 def _period_report(org,rtype,f,limit,offset):
-    cfg=PERIOD_REPORTS[rtype];periods=list(_periods(org,f))
+    cfg=PERIOD_REPORTS[rtype];qs=_periods(org,f)
+    if rtype=='driver-payroll':qs=qs.filter(pk__in=Obligation.objects.filter(kind='driver_salary').values('period_id'))  # vehicle-only agreements have no driver side
+    if rtype not in DRIVER_REPORTS:qs=qs.filter(agreement__isnull=False)  # standalone driver agreements only appear in the driver reports
+    periods=list(qs)
     stmts=bulk_ledger_statements(periods);names=_parties(periods)
     columns=['Agreement','Vehicle',cfg['party'],'Month']+[c+' BDT' for c in cfg['columns']]
     rows=[];states=[];totals=[ZERO]*len(cfg['columns'])
     for p in periods:
         vals=cfg['values'](stmts[p.pk]);totals=[t+v for t,v in zip(totals,vals)]
         if rtype in BILL_SIDE:states.append(stmts[p.pk][BILL_SIDE[rtype]]['bill_state'])
-        rows.append([f'AGR-{p.agreement_id}',p.agreement.vehicle.registration,names[p.pk][cfg['party'].lower()],p.month.isoformat()]+[_money(v) for v in vals])
+        rows.append([period_ref(p),_period_vehicle(p),names[p.pk][cfg['party'].lower()],p.month.isoformat()]+[_money(v) for v in vals])
     page,nxt=_page(rows,limit,offset)
     out={'report':rtype,'title':cfg['title'],'columns':columns,'rows':page,'totals':dict(zip([c+' BDT' for c in cfg['columns']],[_money(t) for t in totals])),'count':len(rows),'next':nxt,'filters':f}
     if states:out['bill_states']=_page(states,limit,offset)[0]  # aligned with rows; the UI chooses the colours
@@ -136,14 +148,14 @@ def _entries(org,f,limit,offset):
     for e in _expense_qs(org,f).exclude(state=Expense.State.DRAFT).select_related('period').order_by('-event_date','-id'):
         rows.append((e.event_date,e.pk,[e.public_id,f'AGR-{e.period.agreement_id}',e.event_date.isoformat(),'Expense',_money(e.amount),e.paid_by.title(),e.responsible.title(),{'pending':'Pending approval','posted':'Posted','reversed':'Reversed'}[e.state],e.reference]))
     pq=Payment.objects.filter(organization=org)
-    if f.get('branch_id'):pq=pq.filter(pk__in=Allocation.objects.filter(obligation__period__agreement__branch_id=f['branch_id']).values('payment_id'))
+    if f.get('branch_id'):pq=pq.filter(pk__in=Allocation.objects.filter(period_in_branch('obligation__period__',f['branch_id'])).values('payment_id'))
     pq=entry_dates(pq,as_date(f.get('from')),as_date(f.get('to'))).prefetch_related('allocations__obligation__period')
     for p in pq:
         periods={a.obligation.period for a in p.allocations.all()}
         if f.get('month') and not any(x.month==f['month'] for x in periods):continue
         if f.get('agreement_id') and not any(x.agreement_id==int(f['agreement_id']) for x in periods):continue
         label={'customer_payment':'Customer payment','owner_payout':'Owner payout','driver_payout':'Driver payout','salary_advance':'Salary advance'}[p.kind]
-        agreement=','.join(sorted({f'AGR-{x.agreement_id}' for x in periods}))
+        agreement=','.join(sorted({period_ref(x) for x in periods}))
         rows.append((p.event_date,p.pk,[p.public_id,agreement,p.event_date.isoformat(),label,_money(p.amount),p.party.name if p.kind=='customer_payment' else 'Operator','Operator','Posted',p.reference]))
     rows.sort(key=lambda r:(r[0],r[1]),reverse=True);flat=[r[2] for r in rows]
     page,nxt=_page(flat,limit,offset)

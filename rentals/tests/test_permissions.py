@@ -71,6 +71,9 @@ class PermissionTests(RentalsTestCase):
             for path in ('/expenses','/payments',f'/periods/{self.period.pk}/statement'):self.assertEqual(self.get(role,path).status_code,403,(role,path))
             self.assertEqual(self.get(role,'/snapshot?month=2026-09-01').status_code,403)
 
+    def test_org_wide_staff_can_read_the_snapshot_but_not_the_mechanic(self):
+        for role,status in (('admin',200),('accountant',200),('operations',200),('viewer',200),('mechanic',403)):self.assertEqual(self.get(role,'/snapshot?month=2026-09-01').status_code,status,role)
+
     def test_mechanic_sees_vehicles_only(self):
         self.assertEqual(len(self.get('mechanic','/vehicles').json()['items']),2)
         self.assertEqual(self.get('mechanic','/agreements').json()['items'],[])
