@@ -104,7 +104,7 @@ def issue_driver_period(org,da_id,month,user=None):
     version=_version_for(da,month)
     period=Period.objects.create(organization=org,driver_agreement=da,month=month)
     ob=Obligation.objects.create(period=period,kind=Obligation.Kind.DRIVER,party=da.driver,amount=version.salary)
-    journal(org,'obligation',ob.pk,[('DRIVER_SALARY_EXPENSE',version.salary,ZERO),('DRIVER_PAYABLE',ZERO,version.salary,da.driver)],period=period)
+    journal(org,'obligation',ob.pk,[('DRIVER_SALARY_EXPENSE',version.salary,ZERO),('DRIVER_PAYABLE',ZERO,version.salary,da.driver)],period=period,event_date=month)
     audit(org,user,'period.issue','period',period.pk,after={'driver_agreement_id':da.pk,'month':month,'version':version.number,'salary':version.salary})
     return period
 

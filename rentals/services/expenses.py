@@ -3,7 +3,7 @@ approvals, per-entry override, duplicate warning and proof-required enforcement.
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
-from datetime import timedelta
+from datetime import date, timedelta
 from ..models import Document, MaintenanceCase, Period, AgreementVersion, Approval, Expense, ExpenseCategory, ExpenseRule, JournalEntry, Obligation, OwnerOffset
 from .audit import audit, snap
 from .charges import _post as post_charge_line
@@ -139,14 +139,14 @@ def _book(expense,user):
     if payer=='operator':
         lines=[(debit_account,expense.amount,ZERO,debit_party),('CASH',ZERO,expense.amount)]
         if expense.offset_owner:lines += [('OWNER_PAYABLE',expense.amount,ZERO,parties['owner']),('OWNER_RECOVERABLE',ZERO,expense.amount,parties['owner'])]
-        journal(p.organization,'expense',expense.pk,lines,period=p)
+        journal(p.organization,'expense',expense.pk,lines,period=p,event_date=expense.event_date)
     else:
-        post_charge_line(p.organization,user or expense.recorded_by,p,payer,'expense_front','decrease' if payer=='customer' else 'increase',expense.amount,f'{expense.public_id} paid by {payer}',expense.reference,source=('expense',str(expense.pk)),contra=debit_account,contra_party=debit_party)
+        post_charge_line(p.organization,user or expense.recorded_by,p,payer,'expense_front','decrease' if payer=='customer' else 'increase',expense.amount,f'{expense.public_id} paid by {payer}',expense.reference,source=('expense',str(expense.pk)),event_date=expense.event_date,contra=debit_account,contra_party=debit_party)
 
 def _unbook(expense,user):
     from ..models import Charge
     original=JournalEntry.objects.filter(organization=expense.period.organization,source_type='expense',source_id=str(expense.pk)).first()
-    if original:journal(expense.period.organization,'expense_reversal',expense.pk,[(l.account,l.credit,l.debit,l.party,l.period) for l in original.lines.select_related('party','period')])
+    if original:journal(expense.period.organization,'expense_reversal',expense.pk,[(l.account,l.credit,l.debit,l.party,l.period) for l in original.lines.select_related('party','period')],event_date=date.today())
     front=Charge.objects.filter(organization=expense.period.organization,source_type='expense',source_id=str(expense.pk)).select_related('period').first()
     if front:
         debit_account='OPERATING_EXPENSE' if expense.responsible=='operator' else RECOVERABLE[expense.responsible]

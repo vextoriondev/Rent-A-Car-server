@@ -2,12 +2,13 @@ from datetime import date
 from decimal import Decimal
 from django.db import transaction
 from django.db.models import Q
-from ninja import Query, Router
+from typing import Literal
+from ninja import Query, Router, Schema
 from ninja.errors import HttpError
 from ..models import Party, Vehicle, Agreement, Period
 from .. import policies, services
 from ..models import Agreement as AgreementModel
-from ._shared import AgreementIn, QuickAgreementIn, ReviseIn, AssignDriverIn, TransferOwnerIn, DraftIn, membership, pick_branch, result, agreement_dict, agreement_detail, version_dict, money_dict, paginate
+from ._shared import DatesIn, AgreementIn, QuickAgreementIn, ReviseIn, AssignDriverIn, TransferOwnerIn, DraftIn, membership, pick_branch, result, agreement_dict, agreement_detail, version_dict, money_dict, paginate
 
 router = Router()
 
@@ -44,7 +45,7 @@ def quick_agreement(request,org_id:int,payload:QuickAgreementIn):
         customer=Party.objects.create(organization_id=org_id,kind='customer',name=payload.customer.strip(),created_by=request.user)
         driver=Party.objects.create(organization_id=org_id,kind='driver',name=payload.driver.strip(),created_by=request.user) if payload.driver_provider!='none' else None
         vehicle=Vehicle.objects.create(organization_id=org_id,registration=payload.registration.strip(),model_name=payload.vehicle.strip(),owner=owner,branch=pick_branch(m))
-        a=Agreement(organization_id=org_id,vehicle=vehicle,customer=customer,driver=driver,start_date=payload.start,customer_rent=result(services.bd,payload.rent),owner_rent=result(services.bd,payload.owner_rent),driver_salary=Decimal('0.00') if payload.salary==0 else result(services.bd,payload.salary),fuel_responsible=payload.fuel.lower(),repair_responsible=payload.repair.lower(),owner_offset_allowed=payload.offset,driver_provider=payload.driver_provider,driver_paid_by=payload.driver_paid_by,clauses=payload.clauses.strip())
+        a=Agreement(organization_id=org_id,vehicle=vehicle,customer=customer,driver=driver,start_date=payload.start,end_date=payload.end,customer_rent_basis=payload.rent_basis,owner_rent_basis=payload.owner_rent_basis,driver_salary_basis=payload.salary_basis,payment_schedule=payload.payment_schedule or {},customer_rent=result(services.bd,payload.rent),owner_rent=result(services.bd,payload.owner_rent),driver_salary=Decimal('0.00') if payload.salary==0 else result(services.bd,payload.salary),fuel_responsible=payload.fuel.lower(),repair_responsible=payload.repair.lower(),owner_offset_allowed=payload.offset,driver_provider=payload.driver_provider,driver_paid_by=payload.driver_paid_by,clauses=payload.clauses.strip())
         a,warnings=create_checked(request,org_id,a)
     return {**agreement_dict(Agreement.objects.select_related('vehicle__owner','customer','driver').get(pk=a.pk)),'warnings':warnings}
 
@@ -108,3 +109,43 @@ def transfer_ownership(request,org_id:int,vehicle_id:int,payload:TransferOwnerIn
     m=membership(request,org_id,'ownership.transfer',vehicle=vehicle_id)
     o=result(services.transfer_vehicle_ownership,m.organization,request.user,vehicle_id,payload.owner_id,payload.effective_from)
     return {'vehicle_id':o.vehicle_id,'owner_id':o.owner_id,'effective_from':o.effective_from.isoformat()}
+
+@router.patch('/orgs/{org_id}/agreements/{agreement_id}/dates')
+def update_dates(request,org_id:int,agreement_id:int,payload:DatesIn):
+    """Extend, shorten or remove the end date (the start date never moves)."""
+    m=membership(request,org_id,'agreement.revise',agreement=agreement_id)
+    a=result(services.update_agreement_dates,m.organization,request.user,agreement_id,payload.dict())
+    return {'id':a.pk,'start_date':a.start_date.isoformat(),'end_date':a.end_date.isoformat() if a.end_date else None}
+
+class PreviewIn(Schema):
+    start:date; end:date|None=None; rent:Decimal; owner_rent:Decimal; salary:Decimal=Decimal('0')
+    rent_basis:Literal['per_day','per_month','fixed_total']='per_month'; owner_rent_basis:Literal['per_day','per_month','fixed_total']='per_month'; salary_basis:Literal['per_day','per_month','fixed_total']='per_month'
+    payment_schedule:dict|None=None; has_driver:bool=True
+
+@router.post('/orgs/{org_id}/agreement-preview')
+def preview_agreement(request,org_id:int,payload:PreviewIn):
+    """The wizard's summary: total days, the first months' amounts and the first due dates for a set of terms. Saves nothing."""
+    membership(request,org_id,'agreement.write')
+    out=result(services.preview_terms,payload.start,payload.end,{'customer':payload.rent,'owner':payload.owner_rent,'driver':payload.salary},{'customer':payload.rent_basis,'owner':payload.owner_rent_basis,'driver':payload.salary_basis},payload.payment_schedule,payload.has_driver)
+    return money_dict(out)
+
+@router.get('/orgs/{org_id}/agreements/{agreement_id}/dues')
+def agreement_dues(request,org_id:int,agreement_id:int,side:str='customer',until:date|None=None):
+    """When each side's money is due, what is paid (applied oldest first) and which due is next. Computed from the schedule and the months billed."""
+    m=membership(request,org_id,'read_financial',agreement=agreement_id)
+    a=policies.scope_queryset(request.user,m,Agreement.objects.all()).filter(pk=agreement_id).first()
+    if not a:raise HttpError(404,'Record not found')
+    items=result(services.dues_for,a,side,None,until)
+    v=a.versions.exclude(status='draft').order_by('-effective_from','-number').first()
+    schedule=(v.payment_schedule if v else {}) or {}
+    row=lambda x:{**{k:(str(val) if not isinstance(val,(date,str)) else (val.isoformat() if isinstance(val,date) else val)) for k,val in x.items()}}
+    nxt=services.next_due(items)
+    return {'side':side,'schedule':schedule.get(side) or {'kind':'monthly','day':'last'},'items':[row(x) for x in items],'next_due':row(nxt) if nxt else None}
+
+@router.get('/orgs/{org_id}/agreements/{agreement_id}/statement')
+def agreement_statement(request,org_id:int,agreement_id:int,from_:date|None=Query(None,alias='from'),to:date|None=None):
+    """Exact date range: per side the opening balance (before `from`), the movements and the closing balance (up to `to`)."""
+    m=membership(request,org_id,'read_financial',agreement=agreement_id)
+    a=policies.scope_queryset(request.user,m,Agreement.objects.all()).filter(pk=agreement_id).first()
+    if not a:raise HttpError(404,'Record not found')
+    return money_dict(result(services.agreement_range_statement,a,from_,to))

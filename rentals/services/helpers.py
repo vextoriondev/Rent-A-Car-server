@@ -43,14 +43,15 @@ def ensure_accounts(org):
         if code not in found:found[code]=Account.objects.create(organization=org,code=code,name=name,type=kind,subledger_kind=sub)
     return found
 
-def journal(org,source_type,source_id,lines,period=None):
+def journal(org,source_type,source_id,lines,period=None,event_date=None):
     """Post one balanced entry. A line is (account_code, debit, credit[, party[, period]]); lines without their own period use `period`.
     Each line carries party/agreement/period/vehicle dimensions so the ledger can be read per period and party."""
     debit=sum((Decimal(str(l[1])) for l in lines),ZERO)
     credit=sum((Decimal(str(l[2])) for l in lines),ZERO)
     if debit!=credit or debit<=0: raise DomainError('Journal is not balanced')
     accounts=ensure_accounts(org)
-    entry=JournalEntry.objects.create(organization=org,source_type=source_type,source_id=str(source_id))
+    from datetime import date as _date
+    entry=JournalEntry.objects.create(organization=org,source_type=source_type,source_id=str(source_id),event_date=event_date or _date.today())
     rows=[]
     for l in lines:
         party=l[3] if len(l)>3 else None
@@ -76,6 +77,10 @@ def validate_agreement(agreement):
     if agreement.vehicle.organization_id!=org or agreement.vehicle.owner.organization_id!=org or agreement.customer.organization_id!=org or (agreement.driver_id and agreement.driver.organization_id!=org):raise DomainError('Agreement relationships must belong to the organization')
     if agreement.vehicle.owner.kind!='owner' or agreement.customer.kind!='customer' or (agreement.driver_id and agreement.driver.kind!='driver'):raise DomainError('Party roles do not match agreement')
     if agreement.end_date and agreement.end_date<agreement.start_date:raise DomainError('End date precedes start date')
+    from . import dues, rent_calc
+    agreement.payment_schedule=dues.normalize_schedule(agreement.payment_schedule)
+    for basis,amount in ((agreement.customer_rent_basis,agreement.customer_rent),(agreement.owner_rent_basis,agreement.owner_rent),(agreement.driver_salary_basis,agreement.driver_salary)):
+        rent_calc.build_segments([(agreement.start_date,basis,amount)],agreement.start_date,agreement.end_date)   # unknown basis, or a fixed total without an end date
     if agreement.branch_id is None:agreement.branch_id=agreement.vehicle.branch_id
     if agreement.branch_id!=agreement.vehicle.branch_id:raise DomainError("An agreement must be in the same branch as its vehicle")
     clash=Agreement.objects.filter(vehicle_id=agreement.vehicle_id,active=True).exclude(pk=agreement.pk).filter(Q(end_date__isnull=True)|Q(end_date__gte=agreement.start_date))

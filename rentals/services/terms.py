@@ -8,11 +8,12 @@ from django.db import transaction
 from django.db.models import Q
 from ..models import Agreement, AgreementVersion, DriverAssignment, Party, Period, Vehicle, VehicleOwnership
 from .audit import audit
+from . import dues, rent_calc
 from .helpers import DomainError, bd, validate_agreement
 
-TERM_FIELDS=('customer_rent','owner_rent','driver_salary','fuel_responsible','repair_responsible','owner_offset_allowed','approval_threshold','billing_cadence','payout_cadence','driver_provider','driver_paid_by','clauses','overtime_rate','overtime_unit')
+TERM_FIELDS=('customer_rent','owner_rent','driver_salary','customer_rent_basis','owner_rent_basis','driver_salary_basis','payment_schedule','fuel_responsible','repair_responsible','owner_offset_allowed','approval_threshold','billing_cadence','payout_cadence','driver_provider','driver_paid_by','clauses','overtime_rate','overtime_unit')
 MONEY_FIELDS=('customer_rent','owner_rent','driver_salary','approval_threshold','overtime_rate')
-MIRROR=('customer_rent','owner_rent','driver_salary','fuel_responsible','repair_responsible','owner_offset_allowed','driver_provider','driver_paid_by','clauses')
+MIRROR=('customer_rent','owner_rent','driver_salary','customer_rent_basis','owner_rent_basis','driver_salary_basis','payment_schedule','fuel_responsible','repair_responsible','owner_offset_allowed','driver_provider','driver_paid_by','clauses')
 RESPONSIBLE=('owner','operator','customer','driver')
 DRIVER_ROLES=('operator','owner','customer')
 DRIVER_PROVIDERS=DRIVER_ROLES+('none',)
@@ -23,7 +24,7 @@ def first_of_month_on_or_after(d:date) -> date:
 def ensure_baseline(agreement):
     """Idempotently create v1 / ownership / driver assignment for agreements saved without them (fixtures, legacy rows)."""
     if not agreement.versions.exists():
-        AgreementVersion.objects.create(agreement=agreement,number=1,effective_from=agreement.start_date,customer_rent=agreement.customer_rent,owner_rent=agreement.owner_rent,driver_salary=agreement.driver_salary,fuel_responsible=agreement.fuel_responsible,repair_responsible=agreement.repair_responsible,owner_offset_allowed=agreement.owner_offset_allowed,driver_provider=agreement.driver_provider,driver_paid_by=agreement.driver_paid_by,clauses=agreement.clauses,reason='Initial terms')
+        AgreementVersion.objects.create(agreement=agreement,number=1,effective_from=agreement.start_date,customer_rent=agreement.customer_rent,owner_rent=agreement.owner_rent,driver_salary=agreement.driver_salary,customer_rent_basis=agreement.customer_rent_basis,owner_rent_basis=agreement.owner_rent_basis,driver_salary_basis=agreement.driver_salary_basis,payment_schedule=agreement.payment_schedule,fuel_responsible=agreement.fuel_responsible,repair_responsible=agreement.repair_responsible,owner_offset_allowed=agreement.owner_offset_allowed,driver_provider=agreement.driver_provider,driver_paid_by=agreement.driver_paid_by,clauses=agreement.clauses,reason='Initial terms')
     if not VehicleOwnership.objects.filter(vehicle=agreement.vehicle).exists():
         VehicleOwnership.objects.create(organization=agreement.organization,vehicle=agreement.vehicle,owner=agreement.vehicle.owner,effective_from=agreement.start_date)
     if agreement.driver_id and not agreement.driver_assignments.exists():
@@ -87,7 +88,7 @@ def activate_agreement(org,user,agreement_id):
     return agreement,check_overlaps(agreement)
 
 def _reject_issued(target,start:date,vehicle=False):
-    qs=Period.objects.filter(month__gte=start,**({'agreement__vehicle':target} if vehicle else {'agreement':target}))
+    qs=Period.objects.filter(month__gte=start.replace(day=1),**({'agreement__vehicle':target} if vehicle else {'agreement':target}))
     if qs.exists():raise DomainError('Periods from that date are already issued or closed; use an explicit adjustment instead of a retroactive change')
 
 @transaction.atomic
@@ -96,7 +97,8 @@ def revise_agreement(org,user,agreement_id,effective_from:date,changes:dict,reas
     agreement=Agreement.objects.select_for_update(of=('self',)).select_related('vehicle__owner','customer','driver').get(pk=agreement_id,organization=org)
     if agreement.status!='active':raise DomainError('Only active agreements can be revised')
     ensure_baseline(agreement)
-    start=first_of_month_on_or_after(effective_from)
+    start=effective_from                                  # M12: a revision may start on any date; the month it falls in is computed in dated segments
+    if start<agreement.start_date:raise DomainError('Revision starts before the agreement starts')
     if agreement.end_date and start>agreement.end_date:raise DomainError('Revision starts after the agreement ends')
     _reject_issued(agreement,start)
     unknown=set(changes)-set(TERM_FIELDS)
@@ -106,6 +108,7 @@ def revise_agreement(org,user,agreement_id,effective_from:date,changes:dict,reas
     values={f:getattr(previous,f) for f in TERM_FIELDS}
     for f,v in changes.items():
         if v is not None:values[f]=(Decimal('0.00') if f=='driver_salary' and Decimal(str(v))==0 else bd(v)) if f in MONEY_FIELDS else v
+    values['payment_schedule']=dues.normalize_schedule(values.get('payment_schedule'))
     if values['fuel_responsible'] not in RESPONSIBLE or values['repair_responsible'] not in RESPONSIBLE:raise DomainError('Unsupported responsible party')
     if values['driver_provider'] not in DRIVER_PROVIDERS or values['driver_paid_by'] not in DRIVER_ROLES:raise DomainError('The driver provider must be operator, owner, customer or none (no driver) and the party paying the driver operator, owner or customer')
     if values['driver_provider']=='none':values['driver_salary']=Decimal('0.00')
@@ -116,6 +119,7 @@ def revise_agreement(org,user,agreement_id,effective_from:date,changes:dict,reas
     version=AgreementVersion.objects.create(agreement=agreement,number=number,effective_from=start,status='active',reason=reason.strip(),created_by=user,**values)
     from .expense_rules import copy_rules
     copy_rules(previous,version)
+    rent_calc.validate_versions(agreement.versions.exclude(status='draft'),agreement.start_date,agreement.end_date)   # rolls the revision back when a basis is unknown or a fixed total has no end
     sync_current_columns(agreement)
     version.refresh_from_db()
     audit(org,user,'agreement.revise','agreement',agreement.pk,before={f:getattr(previous,f) for f in TERM_FIELDS},after={f:getattr(version,f) for f in TERM_FIELDS}|{'number':version.number,'effective_from':version.effective_from},reason=reason)
@@ -151,3 +155,22 @@ def transfer_vehicle_ownership(org,user,vehicle_id,owner_id,effective_from:date)
     if current.pk!=vehicle.owner_id:vehicle.owner=current;vehicle.save(update_fields=['owner'])
     audit(org,user,'vehicle.transfer_ownership','vehicle',vehicle.pk,after={'owner_id':owner.pk,'effective_from':start})
     return o
+
+@transaction.atomic
+def update_agreement_dates(org,user,agreement_id,changes):
+    """Extend, shorten or remove the end date. Refused when a month that the change would reprice is already issued."""
+    agreement=Agreement.objects.select_for_update(of=('self',)).get(pk=agreement_id,organization=org)
+    unknown=set(changes)-{'end_date'}
+    if unknown:raise DomainError(f'Unknown fields: {sorted(unknown)}')
+    old,new=agreement.end_date,changes.get('end_date')
+    if new and new<agreement.start_date:raise DomainError('The end date cannot be before the start date')
+    ends=[d for d in (old,new) if d is not None]
+    if ends and old!=new:
+        lo=min(ends)
+        affected=lo.replace(day=1) if lo!=rent_calc.month_end(lo) else (lo+timedelta(days=1)).replace(day=1)   # a month-end cut reprices nothing in its own month
+        if Period.objects.filter(agreement=agreement,month__gte=affected).exists():raise DomainError('A month that this change would reprice is already issued; the end date can only move over months that are not issued yet')
+    agreement.end_date=new
+    rent_calc.validate_versions(agreement.versions.exclude(status='draft'),agreement.start_date,new)
+    agreement.save(update_fields=['end_date'])
+    audit(org,user,'agreement.dates','agreement',agreement.pk,before={'end_date':old},after={'end_date':new})
+    return agreement

@@ -7,7 +7,8 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from django.db.models import CharField, Count, Exists, OuterRef, Sum
 from django.db.models.functions import Cast
-from ..models import Allocation, Document, ExpenseCategory, Expense, Obligation, Payment, Period
+from . import dues, ranged
+from ..models import AgreementVersion, Allocation, Document, ExpenseCategory, Expense, Obligation, Payment, Period
 from ..policies import period_in_branch
 from .helpers import ZERO, DomainError
 from .ranges import entry_dates, overlapping_periods, resolve_range, as_date
@@ -16,13 +17,13 @@ from .statements import bulk_ledger_statements
 # Column sets match the frontend's current CSV exports (lib/reports.ts).
 PERIOD_REPORTS={
     'vehicle-contribution':{'title':'Vehicle contribution','party':'Customer','columns':['Earned rent','Owner gross','Driver salary','Operator costs','Accrual margin'],
-        'values':lambda s:[s['customer']['billed'],s['owner']['gross'],s['driver']['earned'],s['operator']['operator_borne_costs'],s['operator']['accrual_margin']]},
-    'customer-balances':{'title':'Customer balances','party':'Customer','columns':['Billed','Received','Outstanding'],'values':lambda s:[s['customer']['billed'],s['customer']['received'],s['customer']['due']]},
-    'owner-liability':{'title':'Owner liability','party':'Owner','columns':['Gross','Offsets','Paid','Due'],'values':lambda s:[s['owner']['gross'],s['owner']['offsets'],s['owner']['paid'],s['owner']['due']]},
-    'driver-payroll':{'title':'Driver payroll','party':'Driver','columns':['Earned','Advance','Paid','Due'],'values':lambda s:[s['driver']['earned'],s['driver']['advance'],s['driver']['paid'],s['driver']['due']]},
+        'values':lambda m,c:[m['customer']['billed'],m['owner']['gross'],m['driver']['earned'],m['operator']['operator_borne_costs'],m['operator']['accrual_margin']]},
+    'customer-balances':{'title':'Customer balances','party':'Customer','columns':['Billed','Received','Outstanding'],'values':lambda m,c:[m['customer']['billed'],m['customer']['received'],c['customer']['due']]},
+    'owner-liability':{'title':'Owner liability','party':'Owner','columns':['Gross','Offsets','Paid','Due'],'values':lambda m,c:[m['owner']['gross'],m['owner']['offsets'],m['owner']['paid'],c['owner']['due']]},
+    'driver-payroll':{'title':'Driver payroll','party':'Driver','columns':['Earned','Advance','Paid','Due'],'values':lambda m,c:[m['driver']['earned'],m['driver']['advance'],m['driver']['paid'],c['driver']['due']]},
     'income':{'title':'Income','party':'Customer','columns':['Billed','Collected','Outstanding','Owner rent','Driver salary','Operator costs','Margin'],
-        'values':lambda s:[s['customer']['billed'],s['customer']['received'],s['customer']['due'],s['owner']['gross'],s['driver']['earned'],s['operator']['operator_borne_costs'],s['operator']['accrual_margin']]},
-    'cash-movement':{'title':'Cash movement','party':'Customer','columns':['Receipts','Owner paid','Driver paid','Net cash'],'values':lambda s:[s['customer']['received'],s['owner']['paid'],s['driver']['paid'],s['operator']['recorded_cash_movement']]},
+        'values':lambda m,c:[m['customer']['billed'],m['customer']['received'],c['customer']['due'],m['owner']['gross'],m['driver']['earned'],m['operator']['operator_borne_costs'],m['operator']['accrual_margin']]},
+    'cash-movement':{'title':'Cash movement','party':'Customer','columns':['Receipts','Owner paid','Driver paid','Net cash'],'values':lambda m,c:[m['customer']['received'],m['owner']['paid'],m['driver']['paid'],m['operator']['recorded_cash_movement']]},
 }
 OTHER_REPORTS={'cost-by-responsible':'Cost by responsible party','customer-aging':'Customer aging','missing-receipts':'Missing receipts','entries':'Entries','daily-expenses':'Daily expenses','category-by-vehicle':'Cost category by vehicle'}
 DRIVER_REPORTS={'driver-payroll','cash-movement'}   # reports that include standalone driver agreements
@@ -35,19 +36,27 @@ def _page(rows,limit,offset):
     limit=min(200,max(1,limit));offset=max(0,offset)
     return rows[offset:offset+limit],(offset+limit if offset+limit<len(rows) else None)
 
-def _periods(org,f):
+def _periods(org,f,upto=None,exact=False):
+    """upto=None: the months the filters name (period mode). upto=date: every month up to that day (exact mode, so old balances can show as opening balances)."""
     qs=Period.objects.filter(organization=org).select_related('agreement__vehicle','agreement__customer','driver_agreement__vehicle','driver_agreement__driver')
     if f.get('branch_id'):qs=qs.filter(period_in_branch('',f['branch_id']))
-    if f.get('month'):qs=qs.filter(month=f['month'])
-    if f.get('month_from'):qs=qs.filter(month__gte=f['month_from'])
-    if f.get('month_to'):qs=qs.filter(month__lte=f['month_to'])
-    qs=overlapping_periods(qs,as_date(f.get('from')),as_date(f.get('to')))
+    if exact:
+        if upto is not None:qs=qs.filter(month__lte=upto)
+    else:
+        if f.get('month'):qs=qs.filter(month=f['month'])
+        if f.get('month_from'):qs=qs.filter(month__gte=f['month_from'])
+        if f.get('month_to'):qs=qs.filter(month__lte=f['month_to'])
+        qs=overlapping_periods(qs,as_date(f.get('from')),as_date(f.get('to')))
     if f.get('agreement_id'):qs=qs.filter(agreement_id=f['agreement_id'])
     if f.get('vehicle_id'):qs=qs.filter(agreement__vehicle_id=f['vehicle_id'])
     if f.get('customer_id'):qs=qs.filter(agreement__customer_id=f['customer_id'])
     if f.get('owner_id'):qs=qs.filter(obligations__kind='owner_rent',obligations__party_id=f['owner_id'])
     if f.get('driver_id'):qs=qs.filter(obligations__kind='driver_salary',obligations__party_id=f['driver_id'])
     return qs.order_by('-month','agreement_id')
+
+def exact_window(f):
+    """(lo, hi) when the filters ask for exact dates (`from`, `to`); (None, None) otherwise. The month filters (`month`, `month_from`, `month_to`) keep their meaning: whole rent months."""
+    return as_date(f.get('from')),as_date(f.get('to'))
 
 def period_ref(p):
     return f'AGR-{p.agreement_id}' if p.agreement_id else f'DRV-{p.driver_agreement_id}'
@@ -71,7 +80,7 @@ def run_report(org,rtype,filters=None,limit=100,offset=0,as_of=None):
     resolve_range(f.get('from'),f.get('to'))
     if rtype in PERIOD_REPORTS:return _period_report(org,rtype,f,limit,offset)
     if rtype=='cost-by-responsible':return _cost_report(org,f,limit,offset)
-    if rtype=='customer-aging':return _aging_report(org,f,limit,offset,as_of or date.today())
+    if rtype=='customer-aging':return _aging_report(org,f,limit,offset,as_of or exact_window(f)[1] or date.today())   # a range ages as of its last day
     if rtype=='missing-receipts':return _missing_receipts(org,f,limit,offset)
     if rtype=='entries':return _entries(org,f,limit,offset)
     if rtype=='daily-expenses':return _daily_expenses(org,f,limit,offset)
@@ -79,19 +88,35 @@ def run_report(org,rtype,filters=None,limit=100,offset=0,as_of=None):
     raise DomainError('Unknown report')
 
 def _period_report(org,rtype,f,limit,offset):
-    cfg=PERIOD_REPORTS[rtype];qs=_periods(org,f)
+    cfg=PERIOD_REPORTS[rtype]
+    lo,hi=exact_window(f);exact=lo is not None or hi is not None
+    qs=_periods(org,f,upto=hi,exact=exact)
     if rtype=='driver-payroll':qs=qs.filter(pk__in=Obligation.objects.filter(kind='driver_salary').values('period_id'))  # vehicle-only agreements have no driver side
     if rtype not in DRIVER_REPORTS:qs=qs.filter(agreement__isnull=False)  # standalone driver agreements only appear in the driver reports
     periods=list(qs)
-    stmts=bulk_ledger_statements(periods);names=_parties(periods)
+    names=_parties(periods)
+    side=BILL_SIDE.get(rtype)
+    if exact:
+        rs=ranged.ranged_sections(periods,lo,hi)
+        views={p.pk:(rs[p.pk]['movements'],rs[p.pk]['closing'],rs[p.pk]['opening']) for p in periods}
+    else:
+        stmts=bulk_ledger_statements(periods);views={p.pk:(stmts[p.pk],stmts[p.pk],None) for p in periods}
     columns=['Agreement','Vehicle',cfg['party'],'Month']+[c+' BDT' for c in cfg['columns']]
-    rows=[];states=[];totals=[ZERO]*len(cfg['columns'])
+    opening_col=exact and side is not None   # balance reports also show where each balance stood on the first day
+    if opening_col:columns.append('Opening BDT')
+    width=len(cfg['columns'])+(1 if opening_col else 0)
+    rows=[];states=[];totals=[ZERO]*width
     for p in periods:
-        vals=cfg['values'](stmts[p.pk]);totals=[t+v for t,v in zip(totals,vals)]
-        if rtype in BILL_SIDE:states.append(stmts[p.pk][BILL_SIDE[rtype]]['bill_state'])
+        m,c,o=views[p.pk]
+        vals=cfg['values'](m,c)
+        if opening_col:vals=vals+[o[side]['due'] if o else ZERO]
+        if exact and not any(v!=0 for v in vals):continue      # nothing opened, moved or closed in this month
+        totals=[t+v for t,v in zip(totals,vals)]
+        if side:states.append(c[side]['bill_state'])
         rows.append([period_ref(p),_period_vehicle(p),names[p.pk][cfg['party'].lower()],p.month.isoformat()]+[_money(v) for v in vals])
     page,nxt=_page(rows,limit,offset)
-    out={'report':rtype,'title':cfg['title'],'columns':columns,'rows':page,'totals':dict(zip([c+' BDT' for c in cfg['columns']],[_money(t) for t in totals])),'count':len(rows),'next':nxt,'filters':f}
+    cols=columns[4:]
+    out={'report':rtype,'title':cfg['title'],'columns':columns,'rows':page,'totals':dict(zip(cols,[_money(t) for t in totals])),'count':len(rows),'next':nxt,'filters':f}
     if states:out['bill_states']=_page(states,limit,offset)[0]  # aligned with rows; the UI chooses the colours
     return out
 
@@ -116,15 +141,30 @@ def _cost_report(org,f,limit,offset):
     total=sum((Decimal(r[3]) for r in rows),ZERO);page,nxt=_page(rows,limit,offset)
     return {'report':'cost-by-responsible','title':OTHER_REPORTS['cost-by-responsible'],'columns':['Responsible','Category','Entries','Amount BDT'],'rows':page,'totals':{'Amount BDT':_money(total)},'count':len(rows),'next':nxt,'filters':f}
 
+def _custom_due_dates(periods,as_of):
+    """{agreement_id: oldest unpaid customer due date (or None when none is due yet)} for agreements whose schedule is not the month-end default."""
+    ids={p.agreement_id for p in periods if p.agreement_id}
+    if not ids:return {}
+    by={}
+    for v in AgreementVersion.objects.filter(agreement_id__in=ids).exclude(status='draft').order_by('effective_from','number'):by.setdefault(v.agreement_id,[]).append(v)
+    out={}
+    agreements={p.agreement_id:p.agreement for p in periods if p.agreement_id}
+    for aid,vs in by.items():
+        if not dues.is_default(vs,'customer'):out[aid]=dues.oldest_unpaid_due_date(agreements[aid],'customer',vs,as_of)
+    return out
+
 def _aging_report(org,f,limit,offset,as_of):
-    """Outstanding customer balance per customer, aged from the end of the billing month."""
-    periods=list(_periods(org,f));stmts=bulk_ledger_statements(periods);names=_parties(periods)
+    """Outstanding customer balance per customer on one date, aged from the end of the billing month (or the oldest unpaid due date for a custom schedule)."""
+    periods=list(_periods(org,f,upto=as_of,exact=True));names=_parties(periods)
+    sections=ranged.ranged_sections(periods,None,as_of)   # balances as they stood on the date, accruing only the days up to it
     buckets={};oldest={}
+    custom=_custom_due_dates(periods,as_of)   # agreements with their own customer payment schedule age from their oldest unpaid due date
     for p in periods:
-        due=stmts[p.pk]['customer']['due']
+        due=sections[p.pk]['closing']['customer']['due']
         if due<=0:continue
         month_end=(p.month.replace(day=28)+timedelta(days=4)).replace(day=1)-timedelta(days=1)
         days=(as_of-month_end).days
+        if p.agreement_id in custom:days=(as_of-custom[p.agreement_id]).days if custom[p.agreement_id] else 0
         idx=0 if days<=0 else next((i for i,(_,hi) in enumerate(AGING_BUCKETS) if hi is not None and days<=hi),len(AGING_BUCKETS)-1)
         name=names[p.pk]['customer'];row=buckets.setdefault(name,[ZERO]*len(AGING_BUCKETS));row[idx]+=due
         oldest[name]=max(oldest.get(name,0),days)

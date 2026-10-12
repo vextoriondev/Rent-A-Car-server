@@ -19,6 +19,7 @@ ROLE_ACTIONS: dict[str,set[str]] = {
     'sensitive':FINANCE,                            # consent, contacts, logins, other parties' terms
     # concrete endpoint actions (same roles the pre-M1 membership() tuples allowed)
     'party.write':{'admin','accountant','operations'},
+    'party.portal':ORG_WIDE_ROLES,                  # staff-viewed party profile pages (M10)
     'party.read_ids':{'admin'},                     # full NID and licence numbers and identity scans (M16)
     'party.ids_masked':FINANCE,                     # last four characters only
     'vehicle.write':{'admin','operations'},

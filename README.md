@@ -24,7 +24,7 @@ cp .env.example .env        # Windows: copy .env.example .env
 set -a; source .env; set +a  # On Windows, set these variables in your shell instead.
 python manage.py migrate
 python manage.py createsuperuser
-python manage.py seed_demo --username YOUR_USERNAME
+python manage.py seed_demo --username YOUR_USERNAME            # seeds the current month; add --month 2026-09 for a fixed one
 python manage.py runserver 127.0.0.1:8000
 ```
 

@@ -14,9 +14,10 @@ class VehicleIn(Schema): registration:str; model_name:str; owner_id:int; branch_
 class AgreementIn(Schema):
     vehicle_id:int; customer_id:int; driver_id:int|None=None; start_date:date; end_date:date|None=None; branch_id:int|None=None
     customer_rent:Decimal; owner_rent:Decimal; driver_salary:Decimal
+    customer_rent_basis:Literal['per_day','per_month','fixed_total']='per_month'; owner_rent_basis:Literal['per_day','per_month','fixed_total']='per_month'; driver_salary_basis:Literal['per_day','per_month','fixed_total']='per_month'
     fuel_responsible:Literal['owner','operator','customer','driver']='owner'
     repair_responsible:Literal['owner','operator','customer','driver']='owner'
-    owner_offset_allowed:bool=False
+    owner_offset_allowed:bool=False; payment_schedule:dict|None=None
     driver_provider:Literal['operator','owner','customer','none']='operator'; driver_paid_by:Literal['operator','owner','customer']='operator'; clauses:str=''
 class ExpenseIn(Schema):
     period_id:int; category:str; amount:Decimal; event_date:date; paid_by:Literal['operator','owner','customer','driver']; responsible:Literal['owner','operator','customer','driver']; offset_owner:bool=False; reference:str; description:str=''
@@ -44,8 +45,11 @@ class InvoiceIn(Schema): period_id:int; obligation_ids:list[int]|None=None; issu
 class TermsIn(Schema):
     customer_rent:Decimal|None=None; owner_rent:Decimal|None=None; driver_salary:Decimal|None=None
     fuel_responsible:Literal['owner','operator','customer','driver']|None=None; repair_responsible:Literal['owner','operator','customer','driver']|None=None
+    customer_rent_basis:Literal['per_day','per_month','fixed_total']|None=None; owner_rent_basis:Literal['per_day','per_month','fixed_total']|None=None; driver_salary_basis:Literal['per_day','per_month','fixed_total']|None=None
+    payment_schedule:dict|None=None
     owner_offset_allowed:bool|None=None; approval_threshold:Decimal|None=None; overtime_rate:Decimal|None=None; overtime_unit:str|None=None
     driver_provider:Literal['operator','owner','customer','none']|None=None; driver_paid_by:Literal['operator','owner','customer']|None=None; clauses:str|None=None
+class DatesIn(Schema): end_date:date|None=None
 class ReviseIn(Schema): effective_from:date; reason:str; changes:TermsIn
 class AssignDriverIn(Schema): driver_id:int; effective_from:date; salary_override:Decimal|None=None
 class TransferOwnerIn(Schema): owner_id:int; effective_from:date
@@ -60,8 +64,9 @@ class MemberPatch(Schema): role:Literal['admin','accountant','operations','viewe
 class LoginIn(Schema): username:str; password:str
 class RegisterIn(Schema): organization_name:str; username:str; email:str=''; password:str
 class QuickAgreementIn(Schema):
-    customer:str; owner:str; driver:str=''; vehicle:str; registration:str; start:date
+    customer:str; owner:str; driver:str=''; vehicle:str; registration:str; start:date; end:date|None=None
     rent:Decimal; owner_rent:Decimal; salary:Decimal
+    rent_basis:Literal['per_day','per_month','fixed_total']='per_month'; owner_rent_basis:Literal['per_day','per_month','fixed_total']='per_month'; salary_basis:Literal['per_day','per_month','fixed_total']='per_month'; payment_schedule:dict|None=None
     fuel:Literal['Owner','Operator','Customer']='Owner'
     repair:Literal['Owner','Operator','Customer']='Owner'
     offset:bool=False
@@ -103,7 +108,7 @@ def result(fn,*args,**kwargs):
     except IntegrityError as exc:raise HttpError(409,'Duplicate or conflicting record') from exc
 
 def agreement_dict(a):
-    return {'id':a.pk,'vehicle':{'id':a.vehicle_id,'model_name':a.vehicle.model_name,'registration':a.vehicle.registration},'owner':{'id':a.vehicle.owner_id,'name':a.vehicle.owner.name},'customer':{'id':a.customer_id,'name':a.customer.name},'driver':{'id':a.driver_id,'name':a.driver.name} if a.driver_id and a.driver_provider!='none' else None,'start_date':a.start_date.isoformat(),'end_date':a.end_date.isoformat() if a.end_date else None,'customer_rent':str(a.customer_rent),'owner_rent':str(a.owner_rent),'driver_salary':str(a.driver_salary),'fuel_responsible':a.fuel_responsible,'repair_responsible':a.repair_responsible,'owner_offset_allowed':a.owner_offset_allowed,'driver_provider':a.driver_provider,'driver_paid_by':a.driver_paid_by,'clauses':a.clauses}
+    return {'id':a.pk,'vehicle':{'id':a.vehicle_id,'model_name':a.vehicle.model_name,'registration':a.vehicle.registration},'owner':{'id':a.vehicle.owner_id,'name':a.vehicle.owner.name},'customer':{'id':a.customer_id,'name':a.customer.name},'driver':{'id':a.driver_id,'name':a.driver.name} if a.driver_id and a.driver_provider!='none' else None,'start_date':a.start_date.isoformat(),'end_date':a.end_date.isoformat() if a.end_date else None,'customer_rent':str(a.customer_rent),'owner_rent':str(a.owner_rent),'driver_salary':str(a.driver_salary),'customer_rent_basis':a.customer_rent_basis,'owner_rent_basis':a.owner_rent_basis,'driver_salary_basis':a.driver_salary_basis,'payment_schedule':a.payment_schedule or {},'fuel_responsible':a.fuel_responsible,'repair_responsible':a.repair_responsible,'owner_offset_allowed':a.owner_offset_allowed,'driver_provider':a.driver_provider,'driver_paid_by':a.driver_paid_by,'clauses':a.clauses}
 
 def party_dict(p,sensitive=False):
     data={'id':p.pk,'kind':p.kind,'name':p.name,'phone':p.phone,'email':p.email}
@@ -111,14 +116,24 @@ def party_dict(p,sensitive=False):
     return data
 
 def version_dict(v):
-    return {'id':v.pk,'number':v.number,'effective_from':v.effective_from.isoformat(),'status':v.status,'reason':v.reason,'customer_rent':str(v.customer_rent),'owner_rent':str(v.owner_rent),'driver_salary':str(v.driver_salary),'fuel_responsible':v.fuel_responsible,'repair_responsible':v.repair_responsible,'owner_offset_allowed':v.owner_offset_allowed,'approval_threshold':str(v.approval_threshold),'billing_cadence':v.billing_cadence,'payout_cadence':v.payout_cadence,'driver_provider':v.driver_provider,'driver_paid_by':v.driver_paid_by,'clauses':v.clauses,'overtime_rate':str(v.overtime_rate) if v.overtime_rate is not None else None,'overtime_unit':v.overtime_unit}
+    return {'id':v.pk,'number':v.number,'effective_from':v.effective_from.isoformat(),'status':v.status,'reason':v.reason,'customer_rent':str(v.customer_rent),'owner_rent':str(v.owner_rent),'driver_salary':str(v.driver_salary),'customer_rent_basis':v.customer_rent_basis,'owner_rent_basis':v.owner_rent_basis,'driver_salary_basis':v.driver_salary_basis,'payment_schedule':v.payment_schedule or {},'fuel_responsible':v.fuel_responsible,'repair_responsible':v.repair_responsible,'owner_offset_allowed':v.owner_offset_allowed,'approval_threshold':str(v.approval_threshold),'billing_cadence':v.billing_cadence,'payout_cadence':v.payout_cadence,'driver_provider':v.driver_provider,'driver_paid_by':v.driver_paid_by,'clauses':v.clauses,'overtime_rate':str(v.overtime_rate) if v.overtime_rate is not None else None,'overtime_unit':v.overtime_unit}
 
 def rule_dict(r):
     return {'id':r.pk,'category':r.category,'responsible':r.responsible,'first_payer':r.first_payer,'reimbursable':r.reimbursable,'deductible_from':r.deductible_from,'approval_threshold':str(r.approval_threshold) if r.approval_threshold is not None else None,'proof_required':r.proof_required,'notify_parties':r.notify_parties}
 
+def next_dues(a):
+    """The oldest unpaid due on each side that has one (customer, owner and, if there is a driver, driver)."""
+    out={}
+    for side in ('customer','owner','driver'):
+        if side=='driver' and a.driver_provider=='none':continue
+        n=services.next_due(services.dues_for(a,side))
+        if n:out[side]={'due_date':n['due_date'].isoformat(),'amount':str(n['amount']),'paid':str(n['paid']),'state':n['state'],'covers_from':n['covers_from'].isoformat(),'covers_to':n['covers_to'].isoformat()}
+    return out
+
 def agreement_detail(a):
     d=agreement_dict(a);d['status']=a.status
     d['versions']=[{**version_dict(v),'rules':[rule_dict(r) for r in v.expense_rules.order_by('category')]} for v in a.versions.order_by('number')]
+    d['next_dues']=next_dues(a)
     d['driver_assignments']=[{'driver_id':x.driver_id,'driver':x.driver.name,'effective_from':x.effective_from.isoformat(),'effective_to':x.effective_to.isoformat() if x.effective_to else None,'salary_override':str(x.salary_override) if x.salary_override is not None else None} for x in a.driver_assignments.select_related('driver').order_by('effective_from')]
     d['ownerships']=[{'owner_id':x.owner_id,'owner':x.owner.name,'effective_from':x.effective_from.isoformat(),'effective_to':x.effective_to.isoformat() if x.effective_to else None} for x in a.vehicle.ownerships.select_related('owner').order_by('effective_from')]
     return d

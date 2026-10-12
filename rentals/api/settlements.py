@@ -12,6 +12,14 @@ def get_settings(request,org_id:int):
     s=services.get_settings(m.organization)
     return {'cutoff_day':s.cutoff_day,'approval_role':s.approval_role,'negative_owner_blocks_close':s.negative_owner_blocks_close}
 
+@router.get('/orgs/{org_id}/workspace')
+def workspace(request,org_id:int):
+    """The live, read-only policies of the workspace, so no screen has to hard-code them. `message_delivery` becomes `connected` when M7 sends real messages."""
+    m=membership(request,org_id,'read')
+    from ..services.expenses import DEFAULT_THRESHOLD
+    s=services.get_settings(m.organization)
+    return {'name':m.organization.name,'currency':'BDT','default_expense_threshold':str(DEFAULT_THRESHOLD),'month_end':{'cutoff_day':s.cutoff_day,'approval_role':s.approval_role},'message_delivery':'not_connected'}
+
 @router.put('/orgs/{org_id}/settlement-settings')
 def put_settings(request,org_id:int,payload:SettingsIn):
     m=membership(request,org_id,'settings.write')

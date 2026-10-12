@@ -28,7 +28,7 @@ def _contra(kind,side,direction):
     if kind in('opening_balance','carry_out'):return 'OPENING_BALANCE'
     return CONTRA[kind] if side=='customer' else OWNER_DRIVER_CONTRA[side]   # a driver's absence deduction or fine lowers the salary expense
 
-def _post(org,user,period,side,kind,direction,amount,description='',reference='',source=('',''),contra=None,contra_party=None,quantity=None,unit_rate=None):
+def _post(org,user,period,side,kind,direction,amount,description='',reference='',source=('',''),contra=None,contra_party=None,quantity=None,unit_rate=None,event_date=None):
     """`contra`/`contra_party` let an expense paid by a third party choose the other side of the entry (the responsible party's account)."""
     parties=period_parties(period)
     party=parties[side]
@@ -45,7 +45,8 @@ def _post(org,user,period,side,kind,direction,amount,description='',reference=''
     account=SIDE_ACCOUNT[side]
     debit_side=(side=='customer')==(direction=='increase')
     lines=[(account,amount,ZERO,party),(contra,ZERO,amount,contra_party)] if debit_side else [(contra,amount,ZERO,contra_party),(account,ZERO,amount,party)]
-    journal(org,'carry_out' if kind=='carry_out' else 'charge',charge.pk,lines,period=period)
+    when=event_date or min(max(date.today(),period.month),(period.month.replace(day=28)+timedelta(days=4)).replace(day=1)-timedelta(days=1))   # no date of its own: the posting day, kept inside its month
+    journal(org,'carry_out' if kind=='carry_out' else 'charge',charge.pk,lines,period=period,event_date=when)
     audit(org,user,'charge.post' if kind!='carry_out' else 'period.carry_out','charge',charge.pk,after={'kind':kind,'side':side,'direction':direction,'amount':amount,'period_id':period.pk,'description':description,'quantity':quantity,'unit_rate':unit_rate})
     return charge
 
@@ -120,6 +121,6 @@ def carry_forward(org,user,period_id):
         key=f'{prior.pk}:{side}'
         if Charge.objects.filter(organization=org,source_type='carry_forward_out',source_id=key).exists():continue
         amount=abs(due)
-        posted.append(_post(org,user,prior,side,'carry_out',out_dir,amount,f'Carried to {target.month:%Y-%m}',source=('carry_forward_out',key)))
-        posted.append(_post(org,user,target,side,'opening_balance',in_dir,amount,f'Carried from {prior.month:%Y-%m}',source=('carry_forward_in',key)))
+        posted.append(_post(org,user,prior,side,'carry_out',out_dir,amount,f'Carried to {target.month:%Y-%m}',source=('carry_forward_out',key),event_date=target.month))
+        posted.append(_post(org,user,target,side,'opening_balance',in_dir,amount,f'Carried from {prior.month:%Y-%m}',source=('carry_forward_in',key),event_date=target.month))
     return posted

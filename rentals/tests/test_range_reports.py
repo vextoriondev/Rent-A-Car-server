@@ -17,13 +17,15 @@ class M13Base(ReportBase):
         return self.c.patch(f'{self.base}{path}',data=body,content_type='application/json')
 
 class RangeTests(M13Base):
-    def test_range_equals_month_filter_and_overlap_semantics(self):
+    def test_a_range_is_exact_and_the_month_filter_stays_a_whole_month(self):          # M13c replaced the "overlapping months" rule for from/to
         services.issue_period(self.org,self.agreement.pk,date(2026,10,1))
         by_month=self.rep('customer-balances','?month=2026-09-01')
-        by_range=self.rep('customer-balances','?from=2026-09-10&to=2026-09-20')
-        self.assertEqual(by_range['rows'],by_month['rows'])           # a range inside September touches only the September period
+        by_range=self.rep('customer-balances','?from=2026-09-01&to=2026-09-30')
+        self.assertEqual(by_range['rows'][0][4:7],by_month['rows'][0][4:7])            # a whole month gives the same figures either way
+        inside=self.rep('customer-balances','?from=2026-09-10&to=2026-09-20')['rows'][0]
+        self.assertEqual(inside[4:7],['36666.67','70000.00','-3333.33'])               # 11 days of rent accrued; the payment of 20 Sep is in the window
         self.assertEqual(self.rep('customer-balances','?from=2026-09-30&to=2026-10-02')['count'],2)
-        self.assertEqual(self.rep('customer-balances','?from=2026-11-01')['count'],0)
+        self.assertEqual(self.rep('customer-balances','?from=2026-11-01')['count'],2)  # both months still carry their balance into November
         self.assertEqual(self.rep('income','?to=2026-09-30')['count'],1)
 
     def test_bad_ranges_are_refused(self):

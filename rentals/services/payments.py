@@ -40,7 +40,7 @@ def record_payment(org,user,data,key):
         if kind=='customer_payment':lines+=[('CASH',part,ZERO,None,ob.period),('CUSTOMER_RECEIVABLE',ZERO,part,payment.party,ob.period)]
         elif kind=='owner_payout':lines+=[('OWNER_PAYABLE',part,ZERO,payment.party,ob.period),('CASH',ZERO,part,None,ob.period)]
         else:lines+=[('DRIVER_PAYABLE',part,ZERO,payment.party,ob.period),('CASH',ZERO,part,None,ob.period)]
-    journal(org,'payment_advance' if kind=='salary_advance' else 'payment',payment.pk,lines)
+    journal(org,'payment_advance' if kind=='salary_advance' else 'payment',payment.pk,lines,event_date=payment.event_date)
     notice(org,f'payment:{payment.pk}',payment.party,'payment_recorded',{'payment_id':payment.public_id})
     remember(org,'payment',key,data,payment)
     audit(org,user,'payment.record','payment',payment.pk,after={'public_id':payment.public_id,'kind':kind,'amount':amount,'party_id':payment.party_id,'reference':payment.reference,'allocations':[{'obligation_id':r['obligation_id'],'amount':r['amount']} for r in allocations]})

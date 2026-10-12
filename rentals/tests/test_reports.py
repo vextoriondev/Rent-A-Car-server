@@ -108,7 +108,7 @@ class OtherReportTests(ReportBase):
     def test_customer_aging_buckets(self):
         def bucket(as_of):
             r=self.rep('customer-aging',f'?as_of={as_of}');row=r['rows'][0];return {c.replace(' BDT',''):v for c,v in zip(r['columns'][1:],row[1:]) if v!='0.00' and c!='Days overdue'}
-        self.assertEqual(bucket('2026-09-15'),{'Current':'30000.00','Total':'30000.00'})
+        self.assertEqual(bucket('2026-09-15'),{'Current':'50000.00','Total':'50000.00'})          # M13c: the balance on that date, with half the month accrued
         self.assertEqual(bucket('2026-10-20'),{'1-30 days':'30000.00','Total':'30000.00'})
         self.assertEqual(bucket('2026-12-15'),{'61-90 days':'30000.00','Total':'30000.00'})
         self.assertEqual(bucket('2027-03-01'),{'Over 90 days':'30000.00','Total':'30000.00'})

@@ -20,10 +20,10 @@ class TermsHistoryTests(RentalsTestCase):
         self.assertEqual({o.kind:o.amount for o in october.obligations.all()},{'customer_rent':Decimal('120000.00'),'owner_rent':Decimal('70000.00'),'driver_salary':Decimal('20000.00')})
         self.assertEqual(self.agreement.versions.get(number=1).status,'superseded')
 
-    def test_mid_month_effective_date_rounds_up_to_next_period(self):
+    def test_mid_month_effective_date_is_kept_and_the_month_is_split(self):   # M12: no longer rounded up to the 1st
         v=services.revise_agreement(self.org,self.user,self.agreement.pk,date(2026,10,15),{'driver_salary':'25000'},'Raise')
-        self.assertEqual(v.effective_from,date(2026,11,1))
-        self.assertEqual(services.issue_period(self.org,self.agreement.pk,date(2026,10,1)).obligations.get(kind='driver_salary').amount,Decimal('20000.00'))
+        self.assertEqual(v.effective_from,date(2026,10,15))
+        self.assertEqual(services.issue_period(self.org,self.agreement.pk,date(2026,10,1)).obligations.get(kind='driver_salary').amount,Decimal('22741.94'))
         self.assertEqual(services.issue_period(self.org,self.agreement.pk,date(2026,11,1)).obligations.get(kind='driver_salary').amount,Decimal('25000.00'))
 
     def test_retroactive_revision_into_issued_or_closed_period_is_rejected(self):

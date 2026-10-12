@@ -18,6 +18,7 @@ class JournalEntry(models.Model):
     source_type = models.CharField(max_length=30)
     source_id = models.CharField(max_length=40)
     posted_at = models.DateTimeField(auto_now_add=True)
+    event_date = models.DateField(null=True,blank=True,db_index=True,help_text='The day the money event happened (M13c). Accrual entries carry their month start but are spread over its days when read.')
     class Meta: constraints=[models.UniqueConstraint(fields=['organization','source_type','source_id'],name='unique_journal_source')]
 
 class JournalLine(models.Model):
