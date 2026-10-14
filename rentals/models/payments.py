@@ -14,6 +14,7 @@ class Payment(models.Model):
     amount = models.DecimalField(max_digits=14,decimal_places=2)
     reference = models.CharField(max_length=120)
     method = models.CharField(max_length=30,default='bank')
+    note = models.CharField(max_length=240,blank=True,help_text='Why the money moved; shown in the cashbook next to who recorded it')
     event_date = models.DateField()
     recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.PROTECT)
     created_at = models.DateTimeField(auto_now_add=True)

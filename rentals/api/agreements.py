@@ -43,7 +43,12 @@ def quick_agreement(request,org_id:int,payload:QuickAgreementIn):
         if Vehicle.objects.filter(organization_id=org_id,registration__iexact=payload.registration.strip()).exists():raise HttpError(409,'Registration already exists; use the existing vehicle in the full agreement API')
         owner=Party.objects.create(organization_id=org_id,kind='owner',name=payload.owner.strip(),created_by=request.user)
         customer=Party.objects.create(organization_id=org_id,kind='customer',name=payload.customer.strip(),created_by=request.user)
-        driver=Party.objects.create(organization_id=org_id,kind='driver',name=payload.driver.strip(),created_by=request.user) if payload.driver_provider!='none' else None
+        driver=None
+        if payload.driver_provider!='none':
+            if payload.driver_id:  # an existing driver picked from the list: reuse the party, never duplicate it
+                driver=policies.scope_queryset(request.user,m,Party.objects.all(),None).filter(organization_id=org_id,kind='driver',pk=payload.driver_id).first()
+                if driver is None:raise HttpError(422,'That driver was not found')
+            else:driver=Party.objects.create(organization_id=org_id,kind='driver',name=payload.driver.strip(),created_by=request.user)
         vehicle=Vehicle.objects.create(organization_id=org_id,registration=payload.registration.strip(),model_name=payload.vehicle.strip(),owner=owner,branch=pick_branch(m))
         a=Agreement(organization_id=org_id,vehicle=vehicle,customer=customer,driver=driver,start_date=payload.start,end_date=payload.end,customer_rent_basis=payload.rent_basis,owner_rent_basis=payload.owner_rent_basis,driver_salary_basis=payload.salary_basis,payment_schedule=payload.payment_schedule or {},customer_rent=result(services.bd,payload.rent),owner_rent=result(services.bd,payload.owner_rent),driver_salary=Decimal('0.00') if payload.salary==0 else result(services.bd,payload.salary),fuel_responsible=payload.fuel.lower(),repair_responsible=payload.repair.lower(),owner_offset_allowed=payload.offset,driver_provider=payload.driver_provider,driver_paid_by=payload.driver_paid_by,clauses=payload.clauses.strip())
         a,warnings=create_checked(request,org_id,a)

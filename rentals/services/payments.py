@@ -31,7 +31,7 @@ def record_payment(org,user,data,key):
     for period in {ob.period_id:ob.period for ob in obligations}.values():
         part=sum((bd(row['amount']) for row in allocations if next(o for o in obligations if o.pk==row['obligation_id']).period_id==period.pk),ZERO)
         if part>statement(period)[side]['due']:raise DomainError('Payment exceeds an open obligation')
-    payment=Payment.objects.create(organization=org,kind=kind,party_id=party_id,amount=amount,reference=data['reference'].strip(),method=data.get('method','bank'),event_date=data['event_date'],recorded_by=user)
+    payment=Payment.objects.create(organization=org,kind=kind,party_id=party_id,amount=amount,reference=data['reference'].strip(),method=data.get('method','bank'),note=(data.get('note') or '').strip()[:240],event_date=data['event_date'],recorded_by=user)
     Allocation.objects.bulk_create([Allocation(payment=payment,obligation_id=row['obligation_id'],amount=bd(row['amount'])) for row in allocations])
     by_id={ob.pk:ob for ob in obligations}
     lines=[]

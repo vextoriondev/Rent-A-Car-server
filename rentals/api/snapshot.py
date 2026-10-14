@@ -8,6 +8,11 @@ from ._shared import membership, result
 
 router = Router()
 
+def person(user):
+    """Who recorded an entry, as shown in the cashbook."""
+    return (user.get_full_name() or user.username) if user else ''
+
+
 NOTICE_TEXT={'rent_issued':'Rent issued for period {period_id}','expense_posted':'Expense {expense_id} posted','payment_recorded':'Payment {payment_id} recorded','settlement_closed':'Settlement {settlement_id} closed (period {period_id})'}
 
 def notice_text(n):
@@ -35,13 +40,13 @@ def snapshot(request,org_id:int,month:date|None=None,from_:date|None=Query(None,
     for x in period_qs.order_by('month','pk'):periods_by.setdefault(x.agreement_id,[]).append(x)
     period_pks=[x.pk for xs in periods_by.values() for x in xs]
     expenses_by={}
-    for e in Expense.objects.filter(period_id__in=period_pks).order_by('pk'):expenses_by.setdefault(e.period_id,[]).append(e)
+    for e in Expense.objects.filter(period_id__in=period_pks).select_related('recorded_by').order_by('pk'):expenses_by.setdefault(e.period_id,[]).append(e)
     obligations_by={}
-    for ob in Obligation.objects.filter(period_id__in=period_pks).order_by('pk').prefetch_related(Prefetch('allocations',queryset=Allocation.objects.select_related('payment__party').order_by('pk'))):obligations_by.setdefault(ob.period_id,[]).append(ob)
+    for ob in Obligation.objects.filter(period_id__in=period_pks).order_by('pk').prefetch_related(Prefetch('allocations',queryset=Allocation.objects.select_related('payment__party','payment__recorded_by').order_by('pk'))):obligations_by.setdefault(ob.period_id,[]).append(ob)
     agreements=[];entries=[];closed=[];period_ids={};obligation_ids={};expense_ids={};all_periods={}
     for a in agreement_list:
         agreement_id=f'AGR-{a.pk}'
-        agreements.append({'id':agreement_id,'vehicle':a.vehicle.model_name,'registration':a.vehicle.registration,'owner':a.vehicle.owner.name,'customer':a.customer.name,'driver':a.driver.name if a.driver_id and a.driver_provider!='none' else None,'rent':float(a.customer_rent),'ownerRent':float(a.owner_rent),'salary':float(a.driver_salary),'start':a.start_date.isoformat(),'status':'Active','ownerId':a.vehicle.owner_id,'customerId':a.customer_id,'driverId':a.driver_id if a.driver_provider!='none' else None,'rules':{'fuel':a.fuel_responsible.title(),'repair':a.repair_responsible.title(),'offset':a.owner_offset_allowed}})
+        agreements.append({'id':agreement_id,'vehicle':a.vehicle.model_name,'registration':a.vehicle.registration,'owner':a.vehicle.owner.name,'customer':a.customer.name,'driver':a.driver.name if a.driver_id and a.driver_provider!='none' else None,'rent':float(a.customer_rent),'ownerRent':float(a.owner_rent),'salary':float(a.driver_salary),'start':a.start_date.isoformat(),'end':a.end_date.isoformat() if a.end_date else None,'status':'Active','ownerId':a.vehicle.owner_id,'customerId':a.customer_id,'driverId':a.driver_id if a.driver_provider!='none' else None,'rules':{'fuel':a.fuel_responsible.title(),'repair':a.repair_responsible.title(),'offset':a.owner_offset_allowed}})
         found=periods_by.get(a.pk,[])
         if not found:continue
         p=found[-1]
@@ -53,10 +58,10 @@ def snapshot(request,org_id:int,month:date|None=None,from_:date|None=Query(None,
             for e in expenses_by.get(q.pk,[]):
                 public_id=f'EXP-{e.pk}'
                 expense_ids[public_id]=e.pk
-                entries.append({'id':public_id,'agreementId':agreement_id,'type':'Expense','amount':float(e.amount),'date':e.event_date.isoformat(),'category':e.category.title(),'paidBy':e.paid_by.title(),'responsible':e.responsible.title(),'reference':e.reference,'description':e.description or e.category.title(),'status':{'draft':'Draft','pending':'Pending approval','posted':'Posted','reversed':'Reversed'}[e.state],'offset':e.offset_owner})
+                entries.append({'id':public_id,'agreementId':agreement_id,'type':'Expense','amount':float(e.amount),'date':e.event_date.isoformat(),'category':e.category.title(),'paidBy':e.paid_by.title(),'responsible':e.responsible.title(),'reference':e.reference,'description':e.description or e.category.title(),'status':{'draft':'Draft','pending':'Pending approval','posted':'Posted','reversed':'Reversed'}[e.state],'offset':e.offset_owner,'recordedBy':person(e.recorded_by)})
             for alloc in obligations_by.get(q.pk,[]):
                 for row in alloc.allocations.all():
                     pay=row.payment
-                    entries.append({'id':f'PAY-{pay.pk}-{row.pk}','agreementId':agreement_id,'type':{'customer_payment':'Customer payment','owner_payout':'Owner payout','driver_payout':'Driver payout','salary_advance':'Salary advance'}[pay.kind],'amount':float(row.amount),'date':pay.event_date.isoformat(),'category':'Rent' if pay.kind=='customer_payment' else 'Payout','paidBy':pay.party.name if pay.kind=='customer_payment' else 'Operator','responsible':'Operator','reference':pay.reference,'description':pay.get_kind_display(),'status':'Posted'})
+                    entries.append({'id':f'PAY-{pay.pk}-{row.pk}','agreementId':agreement_id,'type':{'customer_payment':'Customer payment','owner_payout':'Owner payout','driver_payout':'Driver payout','salary_advance':'Salary advance'}[pay.kind],'amount':float(row.amount),'date':pay.event_date.isoformat(),'category':'Rent' if pay.kind=='customer_payment' else 'Payout','paidBy':pay.party.name if pay.kind=='customer_payment' else 'Operator','responsible':'Operator','reference':pay.reference,'description':pay.note or pay.get_kind_display(),'recordedBy':person(pay.recorded_by),'status':'Posted'})
     notices=[{'id':f'NT-{n.pk}','title':n.event_type.replace('_',' ').title(),'detail':notice_text(n),'date':n.created_at.date().isoformat(),'status':n.state.title(),'read':False,'recipient':n.recipient.name} for n in policies.branch_scope(m,NotificationOutbox.objects.filter(organization_id=org_id),branch_id).select_related('recipient').order_by('-id')[:200]]
     return {'agreements':agreements,'entries':entries,'notices':notices,'closed':closed,'backend':{'orgId':org_id,'periodIds':period_ids,'obligationIds':obligation_ids,'expenseIds':expense_ids,**({'periods':all_periods} if ranged else {})}}

@@ -51,3 +51,15 @@ class AgreementOverlapTests(RentalsTestCase):
         a,_=services.create_agreement(self.org,self.user,a)
         p=services.issue_period(self.org,a.pk,date(2026,9,1))
         self.assertEqual(p.agreement_version.number,1)
+
+    def test_quick_endpoint_reuses_a_picked_driver_and_shows_the_end_date(self):
+        from django.test import Client
+        from ..models import Party
+        c=Client();c.force_login(self.user)
+        before=Party.objects.filter(organization=self.org,kind='driver').count()
+        body={'customer':'C','owner':'O','driver':self.driver.name,'driver_id':self.driver.pk,'vehicle':'X','registration':'NEW-9','start':'2026-11-01','end':'2026-12-31','rent':'10','owner_rent':'5','salary':'2'}
+        r=c.post(f'/api/v1/orgs/{self.org.pk}/agreements/quick',body,content_type='application/json');self.assertEqual(r.status_code,200,r.content)
+        self.assertEqual(Agreement.objects.get(pk=r.json()['id']).driver_id,self.driver.pk)
+        self.assertEqual(Party.objects.filter(organization=self.org,kind='driver').count(),before)
+        body.update(registration='NEW-10',driver_id=999999)
+        self.assertEqual(c.post(f'/api/v1/orgs/{self.org.pk}/agreements/quick',body,content_type='application/json').status_code,422)

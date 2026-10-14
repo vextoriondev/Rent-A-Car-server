@@ -33,7 +33,7 @@ class RuleIn(Schema):
 class AllocationIn(Schema): obligation_id:int; amount:Decimal
 class PaymentIn(Schema):
     kind:Literal['customer_payment','owner_payout','driver_payout','salary_advance']
-    amount:Decimal; reference:str; method:str='bank'; event_date:date; allocations:list[AllocationIn]
+    amount:Decimal; reference:str; method:str='bank'; note:str=''; event_date:date; allocations:list[AllocationIn]
 class ReasonIn(Schema): reason:str
 class CaseIn(Schema): vehicle_id:int; issue:str; vendor:str=''; quote:Decimal|None=None; downtime_from:date|None=None; downtime_to:date|None=None
 class CasePatch(Schema): issue:str|None=None; vendor:str|None=None; quote:Decimal|None=None; downtime_from:date|None=None; downtime_to:date|None=None; status:Literal['in_progress','done','cancelled']|None=None
@@ -64,7 +64,7 @@ class MemberPatch(Schema): role:Literal['admin','accountant','operations','viewe
 class LoginIn(Schema): username:str; password:str
 class RegisterIn(Schema): organization_name:str; username:str; email:str=''; password:str
 class QuickAgreementIn(Schema):
-    customer:str; owner:str; driver:str=''; vehicle:str; registration:str; start:date; end:date|None=None
+    customer:str; owner:str; driver:str=''; driver_id:int|None=None; vehicle:str; registration:str; start:date; end:date|None=None
     rent:Decimal; owner_rent:Decimal; salary:Decimal
     rent_basis:Literal['per_day','per_month','fixed_total']='per_month'; owner_rent_basis:Literal['per_day','per_month','fixed_total']='per_month'; salary_basis:Literal['per_day','per_month','fixed_total']='per_month'; payment_schedule:dict|None=None
     fuel:Literal['Owner','Operator','Customer']='Owner'
@@ -172,4 +172,4 @@ def expense_dict(e):
     return {'id':e.pk,'public_id':e.public_id,'period_id':e.period_id,'amount':str(e.amount),'category':e.category,'paid_by':e.paid_by,'responsible':e.responsible,'offset_owner':e.offset_owner,'reference':e.reference,'state':e.state,'rule_snapshot':e.rule_snapshot,'reversal_reason':e.reversal_reason,'receipt_reference':e.receipt_reference,'override_reason':e.override_reason,'duplicate_reason':e.duplicate_reason,'rule_id':e.rule_id,'maintenance_case_id':e.maintenance_case_id}
 
 def payment_dict(p):
-    return {'id':p.pk,'public_id':p.public_id,'kind':p.kind,'party_id':p.party_id,'amount':str(p.amount),'reference':p.reference,'allocations':[{'obligation_id':x.obligation_id,'amount':str(x.amount)} for x in p.allocations.all()]}
+    return {'id':p.pk,'public_id':p.public_id,'kind':p.kind,'party_id':p.party_id,'amount':str(p.amount),'reference':p.reference,'note':p.note,'recorded_by':(p.recorded_by.get_full_name() or p.recorded_by.username),'allocations':[{'obligation_id':x.obligation_id,'amount':str(x.amount)} for x in p.allocations.all()]}
