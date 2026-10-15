@@ -1,15 +1,19 @@
-"""Per-version expense rules. A version's rules are frozen once any period was issued under it; change them by revising the agreement."""
+"""Per-version expense rules. A category's rule can be set or changed while no expense of that category was recorded under the version; after that it is frozen, so change it by revising the agreement."""
 from decimal import Decimal
 from django.db import transaction
-from ..models import AgreementVersion, ExpenseCategory, ExpenseRule
+from ..models import AgreementVersion, Expense, ExpenseCategory, ExpenseRule
 from .audit import audit
 from .helpers import DomainError, bd
 from .expenses import ensure_categories, PARTIES
 
+def _require_unused(version,category):
+    """Issuing a month does not freeze a rule; recording a cost of that category does (history must keep the rule it was checked against)."""
+    if Expense.objects.filter(period__agreement_version=version,category=category).exists():raise DomainError('Costs of this category were already recorded under this version; revise the agreement to change its rule')
+
 @transaction.atomic
 def set_expense_rule(org,user,version_id,category,*,responsible,first_payer='operator',reimbursable=True,deductible_from='none',approval_threshold=None,proof_required=False,notify_parties=True):
     version=AgreementVersion.objects.select_for_update(of=('self',)).select_related('agreement').get(pk=version_id,agreement__organization=org)
-    if version.periods.exists():raise DomainError('Periods were already issued under this version; revise the agreement to change rules')
+    _require_unused(version,category)
     ensure_categories(org)
     if not ExpenseCategory.objects.filter(organization=org,code=category,active=True).exists():raise DomainError('Unsupported expense category')
     if responsible not in PARTIES:raise DomainError('Unsupported responsible party')
@@ -23,7 +27,7 @@ def set_expense_rule(org,user,version_id,category,*,responsible,first_payer='ope
 @transaction.atomic
 def delete_expense_rule(org,user,version_id,category):
     version=AgreementVersion.objects.select_for_update().get(pk=version_id,agreement__organization=org)
-    if version.periods.exists():raise DomainError('Periods were already issued under this version; revise the agreement to change rules')
+    _require_unused(version,category)
     ExpenseRule.objects.filter(agreement_version=version,category=category).delete()
     audit(org,user,'expense_rule.delete','agreement_version',version.pk,before={'category':category})
 

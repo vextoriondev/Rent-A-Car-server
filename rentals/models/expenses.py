@@ -16,7 +16,7 @@ class ExpenseCategory(models.Model):
     class Meta: constraints=[models.UniqueConstraint(fields=['organization','code'],name='unique_expense_category_code')]
 
 class ExpenseRule(models.Model):
-    """Who pays and who is liable for one category under one agreement version. Frozen once a period was issued under that version."""
+    """Who pays and who is liable for one category under one agreement version. Frozen per category once a cost of that category was recorded under that version."""
     class Deductible(models.TextChoices): OWNER_PAYABLE='owner_payable','Owner payable'; NONE='none','None'
     agreement_version = models.ForeignKey(AgreementVersion,on_delete=models.CASCADE,related_name='expense_rules')
     category = models.CharField(max_length=40)

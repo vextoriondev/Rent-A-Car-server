@@ -37,14 +37,23 @@ class ExpenseRuleTests(RentalsTestCase):
         with self.assertRaises(services.DomainError):services.record_expense(self.org,self.user,{**d,'responsible':'owner','reference':'R2'},'t2')   # contradicts rule
 
     def test_rule_change_does_not_rewrite_history(self):
-        # period already issued under v1: its rules are frozen
+        e=self.rec(category='toll',responsible='owner',amount=Decimal('50'))      # September (v1) has no toll rule yet
+        self.assertEqual(e.rule_snapshot['source'],'none')
+        # a toll cost now exists under v1: its rule is frozen
         with self.assertRaises(services.DomainError):services.set_expense_rule(self.org,self.user,self.version().pk,'toll',responsible='customer')
         v2=services.revise_agreement(self.org,self.user,self.agreement.pk,date(2026,10,1),{},'Rule change')
         services.set_expense_rule(self.org,self.user,v2.pk,'toll',responsible='customer')
-        e=self.rec(category='toll',responsible='owner',amount=Decimal('50'))      # September (v1) has no toll rule: unchanged
-        self.assertEqual(e.rule_snapshot['source'],'none')
         october=services.issue_period(self.org,self.agreement.pk,date(2026,10,1))
         with self.assertRaises(services.DomainError):services.record_expense(self.org,self.user,self.data(period_id=october.pk,category='toll',responsible='owner',reference='O1',event_date=date(2026,10,3)),'o1')
+
+    def test_rule_can_be_set_on_an_issued_version_until_a_cost_uses_it(self):
+        # September is already issued under v1, yet a category with no costs yet can still get its rule
+        services.set_expense_rule(self.org,self.user,self.version().pk,'damage',responsible='owner',first_payer='operator',deductible_from='owner_payable')
+        services.set_expense_rule(self.org,self.user,self.version().pk,'damage',responsible='owner',first_payer='operator',deductible_from='none')
+        e=self.rec(category='damage',responsible='owner',amount=Decimal('80'))
+        self.assertEqual(e.rule_snapshot['source'],'rule')
+        with self.assertRaises(services.DomainError):services.set_expense_rule(self.org,self.user,self.version().pk,'damage',responsible='customer')
+        with self.assertRaises(services.DomainError):services.delete_expense_rule(self.org,self.user,self.version().pk,'damage')
 
     def test_revision_copies_rules_forward(self):
         v2,_=self.october([('damage',{'responsible':'customer','proof_required':True})])
