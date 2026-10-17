@@ -8,18 +8,18 @@ from .expenses import ensure_categories, PARTIES
 
 def _require_unused(version,category):
     """Issuing a month does not freeze a rule; recording a cost of that category does (history must keep the rule it was checked against)."""
-    if Expense.objects.filter(period__agreement_version=version,category=category).exists():raise DomainError('Costs of this category were already recorded under this version; revise the agreement to change its rule')
+    if Expense.objects.filter(period__agreement_version=version,category=category).exists():raise DomainError('costs_of_this_category_were_already_recorded')
 
 @transaction.atomic
 def set_expense_rule(org,user,version_id,category,*,responsible,first_payer='operator',reimbursable=True,deductible_from='none',approval_threshold=None,proof_required=False,notify_parties=True):
     version=AgreementVersion.objects.select_for_update(of=('self',)).select_related('agreement').get(pk=version_id,agreement__organization=org)
     _require_unused(version,category)
     ensure_categories(org)
-    if not ExpenseCategory.objects.filter(organization=org,code=category,active=True).exists():raise DomainError('Unsupported expense category')
-    if responsible not in PARTIES:raise DomainError('Unsupported responsible party')
-    if first_payer not in PARTIES:raise DomainError('Unsupported first payer')
-    if deductible_from not in ExpenseRule.Deductible.values:raise DomainError('Unknown deduction target')
-    if deductible_from=='owner_payable' and (responsible!='owner' or first_payer!='operator'):raise DomainError('Only operator-paid, owner-responsible costs can be deducted from owner payable')
+    if not ExpenseCategory.objects.filter(organization=org,code=category,active=True).exists():raise DomainError('unsupported_expense_category')
+    if responsible not in PARTIES:raise DomainError('unsupported_responsible_party')
+    if first_payer not in PARTIES:raise DomainError('unsupported_first_payer')
+    if deductible_from not in ExpenseRule.Deductible.values:raise DomainError('unknown_deduction_target')
+    if deductible_from=='owner_payable' and (responsible!='owner' or first_payer!='operator'):raise DomainError('only_operator_paid_owner_responsible_costs_can')
     rule,_=ExpenseRule.objects.update_or_create(agreement_version=version,category=category,defaults={'responsible':responsible,'first_payer':first_payer,'reimbursable':reimbursable,'deductible_from':deductible_from,'approval_threshold':bd(approval_threshold) if approval_threshold is not None else None,'proof_required':proof_required,'notify_parties':notify_parties})
     audit(org,user,'expense_rule.set','agreement_version',version.pk,after={'category':category,'responsible':responsible,'first_payer':first_payer,'deductible_from':deductible_from,'proof_required':proof_required,'approval_threshold':rule.approval_threshold})
     return rule

@@ -1,5 +1,6 @@
 from ninja import Router
 from ninja.errors import HttpError
+from .errors import ApiError
 from .. import policies
 from ..models import NotificationOutbox
 from ._shared import membership, paginate
@@ -15,7 +16,7 @@ def notifications(request,org_id:int,branch_id:int|None=None,limit:int=100,offse
 def retry_notice(request,org_id:int,notice_id:int):
     membership(request,org_id,'notice.retry',notice=notice_id)
     notice=NotificationOutbox.objects.filter(pk=notice_id,organization_id=org_id).first()
-    if not notice:raise HttpError(404,'Notice not found')
-    if notice.state=='delivered':raise HttpError(422,'Delivered messages do not need retry')
+    if not notice:raise ApiError(404, 'notice_not_found')
+    if notice.state=='delivered':raise ApiError(422, 'delivered_messages_do_not_need_retry')
     notice.state='queued';notice.last_error='';notice.save(update_fields=['state','last_error'])
     return {'id':notice.pk,'state':notice.state}

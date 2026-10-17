@@ -1,5 +1,6 @@
 from ninja import Router
 from ninja.errors import HttpError
+from .errors import ApiError
 from .. import policies, services
 from ..models import Settlement
 from ._shared import ReasonIn, SettingsIn, membership, result, settlement_dict, money_dict, paginate
@@ -47,7 +48,7 @@ def settlements(request,org_id:int,month:str|None=None,branch_id:int|None=None,l
 def settlement(request,org_id:int,settlement_id:int):
     m=membership(request,org_id,'read_financial',settlement=settlement_id)
     s=Settlement.objects.filter(pk=settlement_id,organization=m.organization).first()
-    if not s:raise HttpError(404,'Settlement not found')
+    if not s:raise ApiError(404, 'settlement_not_found')
     return settlement_dict(s,lines=True)
 
 @router.post('/orgs/{org_id}/settlements/{settlement_id}/request-approval')

@@ -22,27 +22,27 @@ HORIZON_DAYS=62
 def normalize_schedule(schedule):
     """Validated copy of a schedule ({} when unset). Raises DomainError for anything else."""
     if not schedule:return {}
-    if not isinstance(schedule,dict):raise DomainError('The payment schedule must list customer, owner and driver')
+    if not isinstance(schedule,dict):raise DomainError('the_payment_schedule_must_list_customer_owner')
     out={}
     for side,spec in schedule.items():
-        if side not in SIDES:raise DomainError(f'Unknown side "{side}" in the payment schedule; use customer, owner or driver')
-        if not isinstance(spec,dict):raise DomainError('Each payment schedule needs a kind: weekly, monthly or dates')
+        if side not in SIDES:raise DomainError('unknown_side_side_in_the_payment_schedule', side=side)
+        if not isinstance(spec,dict):raise DomainError('each_payment_schedule_needs_a_kind_weekly')
         kind=spec.get('kind')
         if kind=='weekly':
             wd=spec.get('weekday')
-            if not isinstance(wd,int) or isinstance(wd,bool) or not 0<=wd<=6:raise DomainError('A weekly schedule needs a weekday from 0 (Monday) to 6 (Sunday)')
+            if not isinstance(wd,int) or isinstance(wd,bool) or not 0<=wd<=6:raise DomainError('a_weekly_schedule_needs_a_weekday_from')
             out[side]={'kind':'weekly','weekday':wd}
         elif kind=='monthly':
             day=spec.get('day')
-            if day!='last' and (not isinstance(day,int) or isinstance(day,bool) or not 1<=day<=31):raise DomainError('A monthly schedule needs a day from 1 to 31, or "last"')
+            if day!='last' and (not isinstance(day,int) or isinstance(day,bool) or not 1<=day<=31):raise DomainError('a_monthly_schedule_needs_a_day_from')
             out[side]={'kind':'monthly','day':day}
         elif kind=='dates':
             raw=spec.get('dates')
-            if not isinstance(raw,list) or not raw:raise DomainError('A schedule of chosen dates needs at least one date')
+            if not isinstance(raw,list) or not raw:raise DomainError('a_schedule_of_chosen_dates_needs_at')
             try:dates=sorted({date.fromisoformat(str(x)) for x in raw})
-            except ValueError as exc:raise DomainError('Chosen dates must be written as YYYY-MM-DD') from exc
+            except ValueError as exc:raise DomainError('chosen_dates_must_be_written_as_yyyy') from exc
             out[side]={'kind':'dates','dates':[d.isoformat() for d in dates]}
-        else:raise DomainError('A payment schedule kind must be weekly, monthly or dates')
+        else:raise DomainError('a_payment_schedule_kind_must_be_weekly')
     return out
 
 def spec_for(version,side):return (version.payment_schedule or {}).get(side) or DEFAULT_SPEC
@@ -91,7 +91,7 @@ def due_dates(versions,start,end,side,horizon):
 
 def dues_for(agreement,side,today=None,until=None,versions=None):
     """[{side, due_date, covers_from, covers_to, amount, paid, state}] oldest first. state: paid | partly_paid | due | overdue."""
-    if side not in SIDES:raise DomainError('Side must be customer, owner or driver')
+    if side not in SIDES:raise DomainError('side_must_be_customer_owner_or_driver')
     today=today or date.today()
     versions=versions if versions is not None else _versions(agreement)
     start,end=agreement.start_date,agreement.end_date
@@ -124,7 +124,7 @@ def preview_terms(start,end,amounts,bases,schedule,has_driver=True,months=3,dues
     """What a set of terms would bill and when it would fall due, without saving anything (the wizard's summary line).
     amounts/bases: {'customer','owner','driver'} -> value."""
     from types import SimpleNamespace
-    if end and end<start:raise DomainError('The end date is before the start date')
+    if end and end<start:raise DomainError('the_end_date_is_before_the_start')
     schedule=normalize_schedule(schedule)
     v=SimpleNamespace(effective_from=start,customer_rent=amounts['customer'],owner_rent=amounts['owner'],driver_salary=amounts['driver'] if has_driver else ZERO,
         customer_rent_basis=bases['customer'],owner_rent_basis=bases['owner'],driver_salary_basis=bases['driver'],payment_schedule=schedule,driver_paid_by='operator',driver_provider='operator' if has_driver else 'none')

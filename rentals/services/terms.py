@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from django.db import transaction
 from django.db.models import Q
+from ..i18n import translate
 from ..models import Agreement, AgreementVersion, DriverAssignment, Party, Period, Vehicle, VehicleOwnership
 from .audit import audit
 from . import dues, rent_calc
@@ -33,7 +34,7 @@ def ensure_baseline(agreement):
 def version_for(agreement,month:date):
     """Terms for a month: the latest version effective by the end of that month, so an agreement that starts mid-month (its v1 is dated the start day) still has terms for its first month. Revisions always start on the 1st."""
     v=agreement.versions.exclude(status='draft').filter(effective_from__lt=first_of_month_on_or_after(month+timedelta(days=1))).order_by('-effective_from','-number').first()
-    if not v:raise DomainError('No active agreement terms for this month')
+    if not v:raise DomainError('no_active_agreement_terms_for_this_month')
     return v
 
 def owner_on(vehicle,day:date):
@@ -63,7 +64,7 @@ def check_overlaps(agreement):
     if not agreement.driver_id:return []
     end=agreement.end_date or date.max
     others=Agreement.objects.filter(organization_id=agreement.organization_id,driver_id=agreement.driver_id,active=True,start_date__lte=end).exclude(pk=agreement.pk).filter(Q(end_date__isnull=True)|Q(end_date__gte=agreement.start_date))
-    return [f'Driver is also assigned to agreement AGR-{o.pk} during this period' for o in others]
+    return [translate('warning_driver_also_assigned',{'ref':f'AGR-{o.pk}'}) for o in others]
 
 @transaction.atomic
 def create_agreement(org,user,agreement,reason='Initial terms',draft=False):
@@ -80,7 +81,7 @@ def create_agreement(org,user,agreement,reason='Initial terms',draft=False):
 @transaction.atomic
 def activate_agreement(org,user,agreement_id):
     agreement=Agreement.objects.select_for_update(of=('self',)).select_related('vehicle__owner','customer','driver').get(pk=agreement_id,organization=org)
-    if agreement.status!='draft':raise DomainError('Only draft agreements can be activated')
+    if agreement.status!='draft':raise DomainError('only_draft_agreements_can_be_activated')
     agreement.status='active';agreement.active=True
     validate_agreement(agreement)
     agreement.save();agreement.versions.filter(status='draft').update(status='active')
@@ -89,31 +90,31 @@ def activate_agreement(org,user,agreement_id):
 
 def _reject_issued(target,start:date,vehicle=False):
     qs=Period.objects.filter(month__gte=start.replace(day=1),**({'agreement__vehicle':target} if vehicle else {'agreement':target}))
-    if qs.exists():raise DomainError('Periods from that date are already issued or closed; use an explicit adjustment instead of a retroactive change')
+    if qs.exists():raise DomainError('periods_from_that_date_are_already_issued_2')
 
 @transaction.atomic
 def revise_agreement(org,user,agreement_id,effective_from:date,changes:dict,reason:str):
-    if not reason.strip():raise DomainError('A reason is required')
+    if not reason.strip():raise DomainError('a_reason_is_required')
     agreement=Agreement.objects.select_for_update(of=('self',)).select_related('vehicle__owner','customer','driver').get(pk=agreement_id,organization=org)
-    if agreement.status!='active':raise DomainError('Only active agreements can be revised')
+    if agreement.status!='active':raise DomainError('only_active_agreements_can_be_revised')
     ensure_baseline(agreement)
     start=effective_from                                  # M12: a revision may start on any date; the month it falls in is computed in dated segments
-    if start<agreement.start_date:raise DomainError('Revision starts before the agreement starts')
-    if agreement.end_date and start>agreement.end_date:raise DomainError('Revision starts after the agreement ends')
+    if start<agreement.start_date:raise DomainError('revision_starts_before_the_agreement_starts')
+    if agreement.end_date and start>agreement.end_date:raise DomainError('revision_starts_after_the_agreement_ends')
     _reject_issued(agreement,start)
     unknown=set(changes)-set(TERM_FIELDS)
-    if unknown:raise DomainError(f'Unknown terms: {sorted(unknown)}')
+    if unknown:raise DomainError('unknown_terms_sorted', sorted=sorted(unknown))
     live=agreement.versions.exclude(status='draft')
     previous=live.filter(effective_from__lte=start).order_by('-effective_from','-number').first() or live.order_by('-number').first()
     values={f:getattr(previous,f) for f in TERM_FIELDS}
     for f,v in changes.items():
         if v is not None:values[f]=(Decimal('0.00') if f=='driver_salary' and Decimal(str(v))==0 else bd(v)) if f in MONEY_FIELDS else v
     values['payment_schedule']=dues.normalize_schedule(values.get('payment_schedule'))
-    if values['fuel_responsible'] not in RESPONSIBLE or values['repair_responsible'] not in RESPONSIBLE:raise DomainError('Unsupported responsible party')
-    if values['driver_provider'] not in DRIVER_PROVIDERS or values['driver_paid_by'] not in DRIVER_ROLES:raise DomainError('The driver provider must be operator, owner, customer or none (no driver) and the party paying the driver operator, owner or customer')
+    if values['fuel_responsible'] not in RESPONSIBLE or values['repair_responsible'] not in RESPONSIBLE:raise DomainError('unsupported_responsible_party')
+    if values['driver_provider'] not in DRIVER_PROVIDERS or values['driver_paid_by'] not in DRIVER_ROLES:raise DomainError('the_driver_provider_must_be_operator_owner')
     if values['driver_provider']=='none':values['driver_salary']=Decimal('0.00')
-    if values['driver_provider']!='none' and values['driver_paid_by']=='operator' and values['driver_salary']<=0:raise DomainError('A driver paid by the operator needs a salary above zero')
-    if live.filter(effective_from=start).exists():raise DomainError('A version already starts on that date')
+    if values['driver_provider']!='none' and values['driver_paid_by']=='operator' and values['driver_salary']<=0:raise DomainError('a_driver_paid_by_the_operator_needs')
+    if live.filter(effective_from=start).exists():raise DomainError('a_version_already_starts_on_that_date')
     number=(agreement.versions.order_by('-number').values_list('number',flat=True).first() or 0)+1
     live.filter(effective_from__lt=start).update(status='superseded')
     version=AgreementVersion.objects.create(agreement=agreement,number=number,effective_from=start,status='active',reason=reason.strip(),created_by=user,**values)
@@ -132,7 +133,7 @@ def assign_driver(org,user,agreement_id,driver_id,effective_from:date,salary_ove
     ensure_baseline(agreement)
     start=first_of_month_on_or_after(effective_from)
     _reject_issued(agreement,start)
-    if agreement.driver_assignments.filter(effective_from__gte=start).exists():raise DomainError('A later driver assignment already exists')
+    if agreement.driver_assignments.filter(effective_from__gte=start).exists():raise DomainError('a_later_driver_assignment_already_exists')
     salary=bd(salary_override) if salary_override is not None else None
     agreement.driver_assignments.filter(effective_to__isnull=True).update(effective_to=start-timedelta(days=1))
     a=DriverAssignment.objects.create(organization=org,agreement=agreement,driver=driver,effective_from=start,salary_override=salary)
@@ -148,7 +149,7 @@ def transfer_vehicle_ownership(org,user,vehicle_id,owner_id,effective_from:date)
     for a in Agreement.objects.filter(vehicle=vehicle).select_related('vehicle','organization'):ensure_baseline(a)
     start=first_of_month_on_or_after(effective_from)
     _reject_issued(vehicle,start,vehicle=True)
-    if vehicle.ownerships.filter(effective_from__gte=start).exists():raise DomainError('A later ownership record already exists')
+    if vehicle.ownerships.filter(effective_from__gte=start).exists():raise DomainError('a_later_ownership_record_already_exists')
     vehicle.ownerships.filter(effective_to__isnull=True).update(effective_to=start-timedelta(days=1))
     o=VehicleOwnership.objects.create(organization=org,vehicle=vehicle,owner=owner,effective_from=start)
     current=owner_on(vehicle,date.today())
@@ -161,14 +162,14 @@ def update_agreement_dates(org,user,agreement_id,changes):
     """Extend, shorten or remove the end date. Refused when a month that the change would reprice is already issued."""
     agreement=Agreement.objects.select_for_update(of=('self',)).get(pk=agreement_id,organization=org)
     unknown=set(changes)-{'end_date'}
-    if unknown:raise DomainError(f'Unknown fields: {sorted(unknown)}')
+    if unknown:raise DomainError('unknown_fields_sorted', sorted=sorted(unknown))
     old,new=agreement.end_date,changes.get('end_date')
-    if new and new<agreement.start_date:raise DomainError('The end date cannot be before the start date')
+    if new and new<agreement.start_date:raise DomainError('the_end_date_cannot_be_before_the')
     ends=[d for d in (old,new) if d is not None]
     if ends and old!=new:
         lo=min(ends)
         affected=lo.replace(day=1) if lo!=rent_calc.month_end(lo) else (lo+timedelta(days=1)).replace(day=1)   # a month-end cut reprices nothing in its own month
-        if Period.objects.filter(agreement=agreement,month__gte=affected).exists():raise DomainError('A month that this change would reprice is already issued; the end date can only move over months that are not issued yet')
+        if Period.objects.filter(agreement=agreement,month__gte=affected).exists():raise DomainError('a_month_that_this_change_would_reprice')
     agreement.end_date=new
     rent_calc.validate_versions(agreement.versions.exclude(status='draft'),agreement.start_date,new)
     agreement.save(update_fields=['end_date'])

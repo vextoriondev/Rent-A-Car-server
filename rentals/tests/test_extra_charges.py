@@ -39,22 +39,22 @@ class ExtraChargeTests(ReportBase):
         self.post('f-2','driver','fine',amount=D(300),description='traffic fine')
         s=self.st();self.assertEqual(s['customer']['due']-before['customer']['due'],D(500));self.assertEqual(before['driver']['due']-s['driver']['due'],D(300))
         self.reconciles()
-        with self.assertRaisesMessage(services.DomainError,'customer or the driver'):self.post('f-3','owner','fine',amount=D(1))
+        with self.assertErrorCode('extra_fine_customer_or_driver'):self.post('f-3','owner','fine',amount=D(1))
 
     def test_wrong_sides_and_missing_reason_or_amount_are_refused(self):
-        with self.assertRaisesMessage(services.DomainError,'customer'):self.post('x1','driver','overtime',amount=D(100))
-        with self.assertRaisesMessage(services.DomainError,'driver'):self.post('x2','customer','absence_deduction',amount=D(100))
-        with self.assertRaisesMessage(services.DomainError,'reason'):self.post('x3','customer','fine',amount=D(100),description='  ')
-        with self.assertRaisesMessage(services.DomainError,'amount'):self.post('x4','customer','overtime')
-        with self.assertRaisesMessage(services.DomainError,'above zero'):self.post('x5','customer','overtime',quantity=D(0),unit_rate=D(10))
+        with self.assertErrorCode('extra_overtime_customer_only'):self.post('x1','driver','overtime',amount=D(100))
+        with self.assertErrorCode('extra_absence_driver_only'):self.post('x2','customer','absence_deduction',amount=D(100))
+        with self.assertErrorCode('a_reason_is_required'):self.post('x3','customer','fine',amount=D(100),description='  ')
+        with self.assertErrorCode('give_an_amount_or_a_quantity_and'):self.post('x4','customer','overtime')
+        with self.assertErrorCode('the_quantity_must_be_above_zero_with'):self.post('x5','customer','overtime',quantity=D(0),unit_rate=D(10))
 
     def test_amount_must_equal_quantity_times_rate_when_both_are_given(self):
-        with self.assertRaisesMessage(services.DomainError,'quantity'):self.post('m1','customer','overtime',quantity=D(2),unit_rate=D(100),amount=D(999))
+        with self.assertErrorCode('the_amount_must_equal_quantity_x_rate'):self.post('m1','customer','overtime',quantity=D(2),unit_rate=D(100),amount=D(999))
         self.assertEqual(self.post('m2','customer','overtime',quantity=D(2),unit_rate=D(100),amount=D(200)).amount,D(200))
 
     def test_idempotent_and_large_amounts_need_an_approver(self):
         a=self.post('i-1','customer','fine',amount=D(500));b=self.post('i-1','customer','fine',amount=D(500));self.assertEqual(a.pk,b.pk)
-        with self.assertRaisesMessage(services.DomainError,'approval'):self.post('big','customer','fine',amount=D(5000))   # default threshold 5,000
+        with self.assertErrorCode('charges_of_threshold_or_more_need_approval'):self.post('big','customer','fine',amount=D(5000))   # default threshold 5,000
         self.assertEqual(self.post('big','customer','fine',amount=D(5000),can_approve=True).amount,D(5000))
 
     def test_audited_with_quantity_and_rate(self):

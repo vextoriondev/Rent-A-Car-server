@@ -65,7 +65,7 @@ def ranged_sections(periods,lo,hi):
     return out
 
 def check_range(lo,hi):
-    if lo is None or hi is None:raise DomainError('Give both a from and a to date')
+    if lo is None or hi is None:raise DomainError('give_both_a_from_and_a_to')
     return resolve_range(lo,hi)
 
 SIDE_FIELDS={'customer':('billed','received','carried_forward','due'),'owner':('gross','offsets','net','paid','carried_forward','due'),'driver':('earned','advance','paid','carried_forward','due')}
@@ -82,7 +82,7 @@ def agreement_range_statement(agreement,lo,hi):
         lines=by[p.pk]
         merged['opening']+=window_rows(lines,p,None,lo-timedelta(days=1));merged['movements']+=window_rows(lines,p,lo,hi);merged['closing']+=window_rows(lines,p,None,hi)
     meta=periods[-1] if periods else None
-    if meta is None:raise DomainError('This agreement has no issued month yet')
+    if meta is None:raise DomainError('this_agreement_has_no_issued_month_yet')
     secs={k:_sections(meta,rows) for k,rows in merged.items()}
     out={'agreement_id':agreement.pk,'from':lo.isoformat(),'to':hi.isoformat()}
     for side in ('customer','owner','driver'):

@@ -36,7 +36,7 @@ class ReadinessTests(SettlementBase):
         pre=services.preview_settlement(self.org,self.period.pk);self.assertTrue(pre['ready']);self.assertIn('uninvoiced_obligation',self.codes())
         services.record_expense(self.org,self.user,{'period_id':self.period.pk,'category':'repair','amount':D(6000),'paid_by':'operator','responsible':'owner','offset_owner':False,'reference':'BIG','event_date':date(2026,9,3)},'big')
         pre=services.preview_settlement(self.org,self.period.pk);self.assertFalse(pre['ready'])
-        e=next(x for x in pre['exceptions'] if x['code']=='pending_expense');self.assertEqual((e['severity'],e['message']),('blocking','Pending expense approval blocks close'));self.assertTrue(e['ref'])
+        e=next(x for x in pre['exceptions'] if x['code']=='pending_expense');self.assertEqual(e['severity'],'blocking');self.assertTrue(e['ref'])
         services.record_expense(self.org,self.user,{'period_id':self.period.pk,'category':'fuel','amount':D(100),'paid_by':'operator','responsible':'owner','reference':'DR','event_date':date(2026,9,4),'draft':True},'dr')
         self.assertIn('draft_expense',self.codes(severity='blocking'))
 
@@ -66,10 +66,10 @@ class WorkflowTests(SettlementBase):
         self.assertEqual(services.statement(self.period)['customer']['due'],before['customer']['due'])
         due={'customer':D(30000),'owner':D(12000),'driver':D(5000)}
         for side,amount in due.items():
-            rows=s.lines.filter(section=side).exclude(label='Due');self.assertEqual(sum(r.amount for r in rows),amount,side)
-            self.assertEqual(s.lines.get(section=side,label='Due').amount,amount)
+            rows=s.lines.filter(section=side).exclude(label__contains='line_due');self.assertEqual(sum(r.amount for r in rows),amount,side)
+            self.assertEqual(s.lines.get(section=side,label__contains='line_due').amount,amount)
         self.assertTrue(s.lines.filter(source_type='payment').exists());self.assertTrue(s.lines.filter(source_type='expense',section='owner').exists())
-        self.assertEqual(s.lines.get(label='Accrual margin').amount,D(20000))
+        self.assertEqual(s.lines.get(label__contains='line_profit').amount,D(20000))
         self.assertEqual(NotificationOutbox.objects.filter(event_type='settlement_closed').count(),3)
 
     def test_blocking_exception_stops_request_and_state_order_is_enforced(self):
@@ -78,7 +78,7 @@ class WorkflowTests(SettlementBase):
         with self.assertRaises(services.DomainError):services.close_settlement(self.org,self.user,s.pk)                   # not approved
         services.record_expense(self.org,self.user,{'period_id':self.period.pk,'category':'repair','amount':D(6000),'paid_by':'operator','responsible':'owner','reference':'P','event_date':date(2026,9,3)},'p')
         with self.assertRaises(services.DomainError) as ctx:services.request_settlement_approval(self.org,self.user,s.pk)
-        self.assertIn('Pending expense approval',str(ctx.exception))
+        self.assertEqual(ctx.exception.code,'close_blocked_by_items')
 
     def test_approval_authority_comes_from_org_settings(self):
         s=services.prepare_settlement(self.org,self.user,self.period.pk);services.request_settlement_approval(self.org,self.user,s.pk)
@@ -91,7 +91,7 @@ class WorkflowTests(SettlementBase):
         s=services.prepare_settlement(self.org,self.user,self.period.pk);services.request_settlement_approval(self.org,self.user,s.pk);services.approve_settlement(self.org,self.admin,s.pk,'admin')
         self.pay('customer_payment','1000','LATE-1')
         with self.assertRaises(services.DomainError) as ctx:services.close_settlement(self.org,self.user,s.pk)
-        self.assertIn('changed since approval',str(ctx.exception))
+        self.assertEqual(ctx.exception.code,'the_statement_changed_since_approval_request_approval')
         s=services.request_settlement_approval(self.org,self.user,s.pk);services.approve_settlement(self.org,self.admin,s.pk,'admin');self.assertEqual(services.close_settlement(self.org,self.user,s.pk).state,'closed')
 
     def test_close_retry_is_idempotent(self):
@@ -105,7 +105,7 @@ class WorkflowTests(SettlementBase):
     def test_wrapper_close_period_keeps_legacy_messages_and_creates_settlement(self):
         services.record_expense(self.org,self.user,{'period_id':self.period.pk,'category':'repair','amount':D(6000),'paid_by':'operator','responsible':'owner','reference':'W','event_date':date(2026,9,3)},'w')
         with self.assertRaises(services.DomainError) as ctx:services.close_period(self.org,self.user,self.period.pk)
-        self.assertEqual(str(ctx.exception),'Pending expense approval blocks close');self.assertFalse(Settlement.objects.filter(state='closed').exists())
+        self.assertEqual(ctx.exception.code,'close_blocked_by_items');self.assertFalse(Settlement.objects.filter(state='closed').exists())
         Expense.objects.filter(reference='W').update(state='posted')
         p=services.close_period(self.org,self.user,self.period.pk);self.assertIsNotNone(p.closed_at);self.assertEqual(Settlement.objects.get().state,'closed')
 
@@ -125,7 +125,7 @@ class ReopenTests(SettlementBase):
         october=services.issue_period(self.org,self.agreement.pk,date(2026,10,1))
         services.carry_forward(self.org,self.user,october.pk)
         with self.assertRaises(services.DomainError) as ctx:services.reopen_settlement(self.org,self.admin,sept.pk,'why')
-        self.assertIn('carried forward',str(ctx.exception))
+        self.assertEqual(ctx.exception.code,'this_month_balance_was_already_carried_forward')
         oct_s=services.prepare_settlement(self.org,self.user,october.pk)
         self.assertEqual(oct_s.state,'draft')
 
@@ -135,7 +135,7 @@ class ReopenTests(SettlementBase):
         october.closed_at=sept.closed_at;october.save()
         services.prepare_settlement(self.org,self.user,october.pk)
         with self.assertRaises(services.DomainError) as ctx:services.reopen_settlement(self.org,self.admin,sept.pk,'x')
-        self.assertIn('latest closed month',str(ctx.exception))
+        self.assertEqual(ctx.exception.code,'only_the_latest_closed_month_can_be')
 
     def test_only_closed_settlements_can_be_reopened(self):
         s=services.prepare_settlement(self.org,self.user,self.period.pk)
@@ -147,9 +147,9 @@ class LateEntryTests(SettlementBase):
     def test_closed_period_never_takes_entry_silently(self):
         self.pay_all_but();self.settle()
         with self.assertRaises(services.DomainError) as ctx:services.record_expense(self.org,self.user,self.data(),'l1')
-        self.assertIn('late_entry=true',str(ctx.exception));self.assertIn('2026-10',str(ctx.exception))
+        self.assertEqual(ctx.exception.code,'period_closed_late_entry');self.assertEqual(ctx.exception.params['nxt'],'2026-10')
         with self.assertRaises(services.DomainError) as ctx:services.record_expense(self.org,self.user,self.data(late_entry=True),'l2')
-        self.assertIn('Issue 2026-10 first',str(ctx.exception))
+        self.assertEqual(ctx.exception.code,'issue_nxt_first_then_post_the_late')
 
     def test_late_entry_posts_to_next_open_period_as_linked_adjustment(self):
         self.pay_all_but();self.settle();sept_before=services.statement(self.period)
@@ -168,7 +168,7 @@ class LateEntryTests(SettlementBase):
     def test_payment_into_closed_period_points_to_carry_forward(self):
         self.pay_all_but();self.settle()
         with self.assertRaises(services.DomainError) as ctx:self.pay('customer_payment','1000','CLOSED-P')
-        self.assertIn('carry its balance forward',str(ctx.exception))
+        self.assertEqual(ctx.exception.code,'period_closed_carry_forward')
 
 class SettlementApiTests(SettlementBase):
     def test_api_flow_permissions_and_wrapper(self):

@@ -63,10 +63,10 @@ class DailyAndCategoryTests(M13Base):
         pend=self.expense('X4',6000,date(2026,9,3),category='cleaning')           # over the threshold: stays pending
         self.assertEqual(pend.state,'pending')
         r=self.rep('daily-expenses','?date=2026-09-03')
-        self.assertEqual(r['columns'],['Vehicle','Agreement','Category','Amount BDT','Paid by','Responsible','State','Reference','Receipt'])
+        self.assertEqual(r['column_ids'],['vehicle','agreement','category','amount','paid_by','responsible','status','reference','receipt'])
         self.assertEqual(r['count'],4)                                              # GAR-0182 repair (posted by the worked example) + three more
-        posted=sum((D(x[3]) for x in r['rows'] if x[6]=='Posted'),D(0))
-        self.assertEqual(r['totals']['Amount BDT'],str(posted.quantize(D('0.01'))))
+        posted=sum((D(x[3]) for x in r['rows'] if x[6]=='Recorded'),D(0))
+        self.assertEqual(r['totals']['amount'],str(posted.quantize(D('0.01'))))
         self.assertEqual(sum(D(v) for v in r['breakdowns']['by_category'].values()),posted)
         self.assertEqual(sum(D(v) for v in r['breakdowns']['by_responsible'].values()),posted)
         self.assertEqual(self.rep('daily-expenses','?date=2026-09-03&state=pending')['count'],1)
@@ -86,10 +86,10 @@ class DailyAndCategoryTests(M13Base):
         self.expense('F1',900,date(2026,9,5));self.expense('F2',400,date(2026,9,6),period=p2);self.expense('F3',500,date(2026,9,7),category='toll')
         r=self.rep('category-by-vehicle','?category=fuel');self.assertEqual(r['count'],2)
         self.assertEqual({x[0]:x[3] for x in r['rows']},{'DHA-19-7724':'900.00','CTG-77':'400.00'})
-        self.assertEqual(r['totals']['Amount BDT'],'1300.00')
+        self.assertEqual(r['totals']['amount'],'1300.00')
         cost=sum((D(x[3]) for x in self.rep('cost-by-responsible')['rows'] if x[1]=='Fuel'),D(0))
-        self.assertEqual(D(r['totals']['Amount BDT']),cost)
-        self.assertEqual(self.rep('category-by-vehicle','?category=fuel&from=2026-09-06&to=2026-09-30')['totals']['Amount BDT'],'400.00')
+        self.assertEqual(D(r['totals']['amount']),cost)
+        self.assertEqual(self.rep('category-by-vehicle','?category=fuel&from=2026-09-06&to=2026-09-30')['totals']['amount'],'400.00')
         self.assertEqual(self.c.get(f'{self.base}/reports/category-by-vehicle').status_code,422)
         self.assertEqual(self.c.get(f'{self.base}/reports/category-by-vehicle?category=nope').status_code,422)
 
@@ -100,15 +100,15 @@ class DailyAndCategoryTests(M13Base):
         Membership.objects.filter(user=self.user).update(role='admin')
         r=self.patch(f'/expense-categories/{fuel["id"]}',{'name':'Gas','active':False});self.assertEqual(r.status_code,200,r.content)
         self.assertEqual((r.json()['code'],r.json()['name'],r.json()['active']),('fuel','Gas',False))
-        with self.assertRaisesMessage(services.DomainError,'deactivated'):self.expense('G2',100,date(2026,9,6))
-        self.assertEqual(self.rep('category-by-vehicle','?category=fuel')['totals']['Amount BDT'],'900.00')
+        with self.assertErrorCode('The category "Gas" is deactivated and cannot be used for new expenses'):self.expense('G2',100,date(2026,9,6))
+        self.assertEqual(self.rep('category-by-vehicle','?category=fuel')['totals']['amount'],'900.00')
         self.assertEqual(self.rep('daily-expenses','?date=2026-09-05&category=fuel')['count'],1)
         self.assertTrue(AuditEvent.objects.filter(action='category.update').exists())
         self.assertEqual(self.patch(f'/expense-categories/{fuel["id"]}',{'active':True}).status_code,200);self.expense('G3',100,date(2026,9,7))
 
 class IncomeAgingBillStateTests(M13Base):
     def test_income_margin_equals_statement_margin(self):
-        r=self.rep('income');self.assertEqual(r['columns'][4:],['Billed BDT','Collected BDT','Outstanding BDT','Owner rent BDT','Driver salary BDT','Operator costs BDT','Margin BDT'])
+        r=self.rep('income');self.assertEqual(r['column_ids'][4:],['billed','collected','money_to_take','owner_rent','driver_salary','your_costs','profit'])
         self.assertEqual(r['rows'][0][4:],['100000.00','70000.00','30000.00','60000.00','20000.00','0.00','20000.00'])   # worked example margin 20,000
         self.assertEqual(D(r['rows'][0][-1]),services.statement(self.period)['operator']['accrual_margin'])
         self.expense('I1',1500,date(2026,9,8),category='cleaning',responsible='operator')
@@ -119,9 +119,9 @@ class IncomeAgingBillStateTests(M13Base):
 
     def test_aging_days_overdue(self):
         def days(as_of):return self.rep('customer-aging',f'?as_of={as_of}')['rows'][0][-1]
-        self.assertEqual(self.rep('customer-aging')['columns'][-1],'Days overdue')
+        self.assertEqual(self.rep('customer-aging')['column_ids'][-1],'days_overdue')
         self.assertEqual(days('2026-09-15'),0);self.assertEqual(days('2026-10-20'),20);self.assertEqual(days('2027-03-01'),152)
-        self.assertNotIn('Days overdue',self.rep('customer-aging')['totals'])
+        self.assertNotIn('days_overdue',self.rep('customer-aging')['totals'])
 
     def test_bill_state_all_three_values_on_statements_and_reports(self):
         s=services.statement(self.period)

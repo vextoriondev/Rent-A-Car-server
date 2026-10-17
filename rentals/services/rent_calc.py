@@ -36,13 +36,13 @@ def build_segments(entries,agreement_start,agreement_end=None):
     entries=sorted(entries,key=lambda e:e[0])
     out=[]
     for i,(eff,basis,amount) in enumerate(entries):
-        if basis not in BASES:raise DomainError(f'Unknown rent basis "{basis}"; use per day, per month or fixed total')
+        if basis not in BASES:raise DomainError('unknown_rent_basis_basis_use_per_day', basis=basis)
         start=max(eff,agreement_start)
         later=entries[i+1][0]-timedelta(days=1) if i+1<len(entries) else None
         ends=[x for x in (later,agreement_end) if x is not None]
         end=min(ends) if ends else None
         if end is not None and end<start:continue            # the version never applies inside the agreement
-        if basis=='fixed_total' and end is None:raise DomainError('A fixed total needs an end date (on the agreement, or by a later revision)')
+        if basis=='fixed_total' and end is None:raise DomainError('a_fixed_total_needs_an_end_date')
         out.append(Seg(start,end,basis,Decimal(amount)))
     return out
 

@@ -2,6 +2,7 @@ from datetime import date, datetime, time, timezone
 from django.http import FileResponse, HttpResponse
 from ninja import File, Form, Router, UploadedFile
 from ninja.errors import HttpError
+from .errors import ApiError
 from .. import policies, services
 from ..models import AuditEvent, Document, MaintenanceCase
 from ._shared import CaseIn, CasePatch, membership, result, case_dict, document_dict, audit_dict, paginate
@@ -13,14 +14,14 @@ router = Router()
 @router.post('/orgs/{org_id}/documents')
 def upload(request,org_id:int,target_type:Form[str],target_id:Form[int],file:File[UploadedFile],category:Form[str]=''):
     m=membership(request,org_id,'document.upload')
-    if not services.in_branch(m,target_type,target_id):raise HttpError(404,'Record not found')
+    if not services.in_branch(m,target_type,target_id):raise ApiError(404, 'record_not_found')
     doc=result(services.upload_document,m.organization,request.user,target_type,target_id,file.name,file.content_type,file.read(),m.role,category)
     return document_dict(doc)
 
 @router.get('/orgs/{org_id}/documents')
 def documents(request,org_id:int,target_type:str,target_id:int):
     m=membership(request,org_id,'document.read')
-    if not services.in_branch(m,target_type,target_id):raise HttpError(404,'Record not found')
+    if not services.in_branch(m,target_type,target_id):raise ApiError(404, 'record_not_found')
     return [document_dict(d) for d in services.list_documents(m.organization,m,target_type,target_id)]
 
 @router.get('/orgs/{org_id}/documents/{document_id}/url')
@@ -32,19 +33,19 @@ def document_url(request,org_id:int,document_id:int):
 def delete_document(request,org_id:int,document_id:int):
     m=membership(request,org_id,'document.delete')
     doc=Document.objects.filter(pk=document_id,organization=m.organization).first()
-    if doc and not services.in_branch(m,doc.target_type,doc.target_id):raise HttpError(404,'Record not found')
+    if doc and not services.in_branch(m,doc.target_type,doc.target_id):raise ApiError(404, 'record_not_found')
     result(services.delete_document,m.organization,request.user,document_id)
     return {'deleted':True}
 
 @router.get('/documents/{document_id}/download')
 def download(request,document_id:int,token:str):
     try:doc=services.resolve_token(token,request.user)
-    except services.DomainError as exc:raise HttpError(403,str(exc)) from exc
-    if doc.pk!=document_id:raise HttpError(403,'Invalid link')
+    except services.DomainError as exc:raise ApiError(403, exc) from exc
+    if doc.pk!=document_id:raise ApiError(403, 'invalid_link')
     member=policies_member(request,doc.organization_id)
-    if not services.can_access(member,doc):raise HttpError(403,'You cannot open this document')
+    if not services.can_access(member,doc):raise ApiError(403, 'you_cannot_open_this_document')
     try:data=services.read_bytes(doc)
-    except services.DomainError as exc:raise HttpError(500,str(exc)) from exc
+    except services.DomainError as exc:raise ApiError(500, exc) from exc
     resp=FileResponse(io.BytesIO(data),content_type=doc.content_type,as_attachment=True,filename=doc.original_name)
     resp['X-Content-Type-Options']='nosniff';resp['Cache-Control']='private, no-store'
     return resp
@@ -52,7 +53,7 @@ def download(request,document_id:int,token:str):
 def policies_member(request,org_id):
     from ..models import Membership
     m=Membership.objects.filter(organization_id=org_id,user=request.user).first()
-    if not m:raise HttpError(403,'You cannot open this document')
+    if not m:raise ApiError(403, 'you_cannot_open_this_document')
     return m
 
 # ---- maintenance
@@ -87,7 +88,7 @@ def approve_case(request,org_id:int,case_id:int):
 @router.get('/orgs/{org_id}/audit-events')
 def audit_events(request,org_id:int,action:str|None=None,target_type:str|None=None,target_id:str|None=None,actor_id:int|None=None,date_from:date|None=None,date_to:date|None=None,limit:int=50,offset:int=0):
     m=membership(request,org_id,'audit.read')
-    if policies.limited_branch(m):raise HttpError(403,'The audit log covers every branch; ask an admin')
+    if policies.limited_branch(m):raise ApiError(403, 'the_audit_log_covers_every_branch_ask')
     qs=AuditEvent.objects.filter(organization=m.organization)
     if action:qs=qs.filter(action__startswith=action)
     if target_type:qs=qs.filter(target_type=target_type)

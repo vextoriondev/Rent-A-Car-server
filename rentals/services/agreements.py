@@ -9,8 +9,8 @@ from .terms import ensure_baseline, version_for, owner_on, assignment_on
 def issue_period(org,agreement_id,month,user=None):
     """Issue a month under the terms, owner and driver effective for that month; the version is recorded on the period."""
     agreement=Agreement.objects.select_for_update(of=('self',)).select_related('vehicle__owner','customer','driver').get(pk=agreement_id,organization=org,active=True)
-    if month.day!=1:raise DomainError('Month must be its first day')
-    if month<agreement.start_date.replace(day=1) or (agreement.end_date and month>agreement.end_date.replace(day=1)):raise DomainError('Agreement is not effective this month')
+    if month.day!=1:raise DomainError('month_must_be_its_first_day')
+    if month<agreement.start_date.replace(day=1) or (agreement.end_date and month>agreement.end_date.replace(day=1)):raise DomainError('agreement_is_not_effective_this_month')
     validate_agreement(agreement)
     existing=Period.objects.filter(organization=org,agreement=agreement,month=month).first()
     if existing:return existing
@@ -18,7 +18,7 @@ def issue_period(org,agreement_id,month,user=None):
     version=version_for(agreement,month)
     owner=owner_on(agreement.vehicle,month)
     assignment=assignment_on(agreement,month) if version.driver_provider!='none' else None
-    if version.driver_provider!='none' and not assignment:raise DomainError('Assign a driver before issuing this month (the agreement terms have one from this month)')
+    if version.driver_provider!='none' and not assignment:raise DomainError('assign_a_driver_before_issuing_this_month')
     live=list(agreement.versions.exclude(status='draft'))
     def side(name):
         field,basis=next((f,b) for n,f,b in rent_calc.SIDES if n==name)

@@ -14,7 +14,7 @@ def _filters(**kw):
 @router.get('/orgs/{org_id}/report-types')
 def report_types(request,org_id:int):
     membership(request,org_id,'read_financial')
-    return [{'type':t,'title':report_service.PERIOD_REPORTS[t]['title'] if t in report_service.PERIOD_REPORTS else report_service.OTHER_REPORTS[t]} for t in report_service.REPORT_TYPES]
+    return [{'type':t,'title':report_service.report_title(t)} for t in report_service.REPORT_TYPES]
 
 class ReportQuery(Schema):
     month:date|None=None; month_from:date|None=None; month_to:date|None=None

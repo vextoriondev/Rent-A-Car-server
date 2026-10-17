@@ -1,7 +1,9 @@
 from datetime import date
 from django.db.models import Prefetch
 from ninja import Query, Router
+from ..i18n import has_code, translate, word
 from ninja.errors import HttpError
+from .errors import ApiError
 from .. import policies, services
 from ..models import Agreement, Allocation, Expense, Obligation, Period, NotificationOutbox
 from ._shared import membership, result
@@ -13,15 +15,18 @@ def person(user):
     return (user.get_full_name() or user.username) if user else ''
 
 
-NOTICE_TEXT={'rent_issued':'Rent issued for period {period_id}','expense_posted':'Expense {expense_id} posted','payment_recorded':'Payment {payment_id} recorded','settlement_closed':'Settlement {settlement_id} closed (period {period_id})'}
+NOTICE_EVENTS=('rent_issued','expense_posted','payment_recorded','settlement_closed')
 
 def notice_text(n):
     """A readable line for the notification list instead of the raw payload."""
-    template=NOTICE_TEXT.get(n.event_type)
-    try:
-        if template:return template.format(**n.payload)
-    except (KeyError,IndexError):pass
-    return ', '.join(f'{k.replace("_"," ")} {v}' for k,v in n.payload.items()) or n.event_type.replace('_',' ').capitalize()
+    if n.event_type in NOTICE_EVENTS:
+        return translate('notice_detail_'+n.event_type,{k:v for k,v in n.payload.items()})
+    return ', '.join(f'{k.replace("_"," ")} {v}' for k,v in n.payload.items()) or notice_title(n.event_type)
+
+def notice_title(event_type):
+    """The short heading of a message, in the user's language."""
+    code='notice_title_'+event_type
+    return translate(code) if has_code(code) else event_type.replace('_',' ').capitalize()
 
 @router.get('/orgs/{org_id}/snapshot')
 def snapshot(request,org_id:int,month:date|None=None,from_:date|None=Query(None,alias='from'),to:date|None=None,branch_id:int|None=None):
@@ -29,7 +34,7 @@ def snapshot(request,org_id:int,month:date|None=None,from_:date|None=Query(None,
     `periodIds`/`obligationIds` point at each agreement's latest period in the range, and `backend.periods` lists them all."""
     m=membership(request,org_id,'snapshot.read')
     start,end=result(services.resolve_range,from_,to)
-    if not month and not (start or end):raise HttpError(422,'Give a month, or from and to')
+    if not month and not (start or end):raise ApiError(422, 'give_a_month_or_from_and_to')
     ranged=month is None
     qs=policies.branch_scope(m,Agreement.objects.filter(organization_id=org_id,active=True),branch_id).select_related('vehicle__owner','customer','driver').order_by('pk')[:200]
     agreement_list=list(qs)
@@ -58,10 +63,10 @@ def snapshot(request,org_id:int,month:date|None=None,from_:date|None=Query(None,
             for e in expenses_by.get(q.pk,[]):
                 public_id=f'EXP-{e.pk}'
                 expense_ids[public_id]=e.pk
-                entries.append({'id':public_id,'agreementId':agreement_id,'type':'Expense','amount':float(e.amount),'date':e.event_date.isoformat(),'category':e.category.title(),'paidBy':e.paid_by.title(),'responsible':e.responsible.title(),'reference':e.reference,'description':e.description or e.category.title(),'status':{'draft':'Draft','pending':'Pending approval','posted':'Posted','reversed':'Reversed'}[e.state],'offset':e.offset_owner,'recordedBy':person(e.recorded_by)})
+                entries.append({'id':public_id,'agreementId':agreement_id,'type':'Expense','amount':float(e.amount),'date':e.event_date.isoformat(),'category':e.category.title(),'paidBy':e.paid_by.title(),'responsible':e.responsible.title(),'reference':e.reference,'description':e.description or word('category',e.category),'status':{'draft':'Draft','pending':'Pending approval','posted':'Posted','reversed':'Reversed'}[e.state],'offset':e.offset_owner,'recordedBy':person(e.recorded_by)})
             for alloc in obligations_by.get(q.pk,[]):
                 for row in alloc.allocations.all():
                     pay=row.payment
-                    entries.append({'id':f'PAY-{pay.pk}-{row.pk}','agreementId':agreement_id,'type':{'customer_payment':'Customer payment','owner_payout':'Owner payout','driver_payout':'Driver payout','salary_advance':'Salary advance'}[pay.kind],'amount':float(row.amount),'date':pay.event_date.isoformat(),'category':'Rent' if pay.kind=='customer_payment' else 'Payout','paidBy':pay.party.name if pay.kind=='customer_payment' else 'Operator','responsible':'Operator','reference':pay.reference,'description':pay.note or pay.get_kind_display(),'recordedBy':person(pay.recorded_by),'status':'Posted'})
-    notices=[{'id':f'NT-{n.pk}','title':n.event_type.replace('_',' ').title(),'detail':notice_text(n),'date':n.created_at.date().isoformat(),'status':n.state.title(),'read':False,'recipient':n.recipient.name} for n in policies.branch_scope(m,NotificationOutbox.objects.filter(organization_id=org_id),branch_id).select_related('recipient').order_by('-id')[:200]]
+                    entries.append({'id':f'PAY-{pay.pk}-{row.pk}','agreementId':agreement_id,'type':{'customer_payment':'Customer payment','owner_payout':'Owner payout','driver_payout':'Driver payout','salary_advance':'Salary advance'}[pay.kind],'amount':float(row.amount),'date':pay.event_date.isoformat(),'category':'Rent' if pay.kind=='customer_payment' else 'Payout','paidBy':pay.party.name if pay.kind=='customer_payment' else 'Operator','responsible':'Operator','reference':pay.reference,'description':pay.note or word('entrytype',pay.kind),'recordedBy':person(pay.recorded_by),'status':'Posted'})
+    notices=[{'id':f'NT-{n.pk}','title':notice_title(n.event_type),'detail':notice_text(n),'date':n.created_at.date().isoformat(),'status':n.state.title(),'read':False,'recipient':n.recipient.name} for n in policies.branch_scope(m,NotificationOutbox.objects.filter(organization_id=org_id),branch_id).select_related('recipient').order_by('-id')[:200]]
     return {'agreements':agreements,'entries':entries,'notices':notices,'closed':closed,'backend':{'orgId':org_id,'periodIds':period_ids,'obligationIds':obligation_ids,'expenseIds':expense_ids,**({'periods':all_periods} if ranged else {})}}

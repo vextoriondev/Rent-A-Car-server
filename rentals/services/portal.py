@@ -6,6 +6,7 @@ import csv
 import io
 from datetime import datetime, timezone
 from decimal import Decimal
+from ..i18n import format_month, translate, word
 from ..models import Agreement, Charge, DriverAgreement, DriverAssignment, Document, NotificationOutbox, Obligation, OwnerOffset, Party, Payment, Period, Vehicle, VehicleOwnership
 from django.db.models import Sum
 from .driver_agreements import driver_balance_split
@@ -20,9 +21,12 @@ FIELDS={
     'owner':['gross','offsets','net','paid','carried_forward','due'],
     'driver':['earned','advance','paid','carried_forward','due'],
 }
-LABELS={'billed':'Billed BDT','received':'Received BDT','carried_forward':'Carried forward BDT','due':'Due BDT','gross':'Gross rent BDT','offsets':'Offsets BDT','net':'Net rent BDT','paid':'Paid BDT','earned':'Earned BDT','advance':'Advance BDT'}
-KIND_LABEL={'customer_payment':'Customer payment','owner_payout':'Owner payout','driver_payout':'Driver payout','salary_advance':'Salary advance'}
-OBLIGATION_LABEL={'customer_rent':'Customer rent','owner_rent':'Owner rent','driver_salary':'Driver salary'}
+def LABELS(field):
+    """Column heading of a statement field, in the user's language."""
+    return translate('col_'+field)+' (৳)'
+def KIND_LABEL(kind):return word('entrytype',kind)
+def OBLIGATION_LABEL(kind):return word('kind',kind)
+OBLIGATION_KINDS=('customer_rent','owner_rent','driver_salary')
 
 def _state(kind,due):return customer_bill_state(due) if kind=='customer' else payable_bill_state(due)
 def _ref(p):return f'AGR-{p.agreement_id}' if p.agreement_id else f'DRV-{p.driver_agreement_id}'
@@ -58,7 +62,7 @@ def portal_statement(org,party,start=None,end=None):
 
 def portal_profile(org,party):
     kind=party.kind
-    data={'party':{'id':party.pk,'kind':kind,'name':party.name,'phone':party.phone,'email':party.email,'contacts':[{'id':c.pk,'name':c.name,'phone':c.phone,'email':c.email,'role':c.role} for c in party.contacts.all()]}}
+    data={'party':{'id':party.pk,'kind':kind,'name':party.name,'phone':party.phone,'email':party.email,'language':party.language,'contacts':[{'id':c.pk,'name':c.name,'phone':c.phone,'email':c.email,'role':c.role} for c in party.contacts.all()]}}
     rows=_rows(party,party_periods(org,party))
     data['summary']={'kind':kind,**_totals(party,rows)}
     if kind=='customer':
@@ -90,18 +94,18 @@ def portal_obligations(org,party,limit=100,offset=0):
     for o in qs:
         paid=(o.allocated or ZERO).quantize(cents)
         deducted=(offsets.get(o.pk) or ZERO).quantize(cents)   # owner offsets also reduce what is still open
-        items.append({'id':o.pk,'period_id':o.period_id,'month':o.period.month.isoformat(),'ref':_ref(o.period),'kind':o.kind,'description':OBLIGATION_LABEL.get(o.kind) or o.get_kind_display()+(f': {notes[o.pk]}' if notes.get(o.pk) else ''),'amount':o.amount,'allocated':paid,'open_amount':max(o.amount-paid-deducted,ZERO)})
+        items.append({'id':o.pk,'period_id':o.period_id,'month':o.period.month.isoformat(),'ref':_ref(o.period),'kind':o.kind,'description':(OBLIGATION_LABEL(o.kind) if o.kind in OBLIGATION_KINDS else word('kind',o.kind))+(f': {notes[o.pk]}' if notes.get(o.pk) else ''),'amount':o.amount,'allocated':paid,'open_amount':max(o.amount-paid-deducted,ZERO)})
     return _page(items,limit,offset)
 
 def portal_payments(org,party,limit=100,offset=0):
     qs=Payment.objects.filter(organization=org,party=party).prefetch_related('allocations__obligation__period').order_by('-event_date','-pk')
-    items=[{'id':p.pk,'public_id':p.public_id,'kind':p.kind,'label':KIND_LABEL[p.kind],'amount':p.amount,'reference':p.reference,'method':p.method,'event_date':p.event_date.isoformat(),
+    items=[{'id':p.pk,'public_id':p.public_id,'kind':p.kind,'label':KIND_LABEL(p.kind),'amount':p.amount,'reference':p.reference,'method':p.method,'event_date':p.event_date.isoformat(),
         'allocations':[{'obligation_id':a.obligation_id,'month':a.obligation.period.month.isoformat(),'amount':a.amount} for a in p.allocations.all()]} for p in qs]
     return _page(items,limit,offset)
 
 def portal_deductions(org,member,party,limit=100,offset=0):
     """Owner offsets: what was deducted from the owner's rent and why, with the receipt files the viewer may open."""
-    if party.kind!='owner':raise DomainError('Deductions exist for owners only')
+    if party.kind!='owner':raise DomainError('deductions_exist_for_owners_only')
     qs=OwnerOffset.objects.filter(obligation__party=party,obligation__period__organization=org).select_related('expense__period__agreement__vehicle').order_by('-expense__event_date','-pk')
     offsets=list(qs)
     docs={}
@@ -118,13 +122,13 @@ def portal_activity(org,party,limit=100,offset=0):
     """One timeline: payments, months issued and charges for this party. Nothing from other parties' sides."""
     items=[]
     for p in Payment.objects.filter(organization=org,party=party):
-        items.append((p.event_date,p.pk,{'date':p.event_date.isoformat(),'type':'payment','text':f'{KIND_LABEL[p.kind]} recorded','amount':p.amount,'ref':p.reference}))
-    for o in Obligation.objects.filter(party=party,period__organization=org,kind__in=list(OBLIGATION_LABEL)).select_related('period__agreement','period__driver_agreement'):
+        items.append((p.event_date,p.pk,{'date':p.event_date.isoformat(),'type':'payment','text':translate('activity_payment_recorded',{'kind':KIND_LABEL(p.kind)}),'amount':p.amount,'ref':p.reference}))
+    for o in Obligation.objects.filter(party=party,period__organization=org,kind__in=list(OBLIGATION_KINDS)).select_related('period__agreement','period__driver_agreement'):
         d=o.created_at.date()
-        items.append((d,o.pk,{'date':d.isoformat(),'type':'month_issued','text':f'{OBLIGATION_LABEL[o.kind]} issued for {o.period.month:%B %Y}','amount':o.amount,'ref':_ref(o.period)}))
+        items.append((d,o.pk,{'date':d.isoformat(),'type':'month_issued','text':translate('activity_month_issued',{'item':OBLIGATION_LABEL(o.kind),'month':format_month(o.period.month)}),'amount':o.amount,'ref':_ref(o.period)}))
     for c in Charge.objects.filter(organization=org,party=party).exclude(kind='carry_out'):
         d=c.created_at.date()
-        items.append((d,c.pk,{'date':d.isoformat(),'type':'charge','text':f"{c.get_kind_display()} ({c.direction}): {c.description or 'no note'}",'amount':c.amount,'ref':c.reference}))
+        items.append((d,c.pk,{'date':d.isoformat(),'type':'charge','text':translate('activity_charge',{'kind':word('kind',c.kind),'direction':word('direction',c.direction),'note':c.description or translate('no_note')}),'amount':c.amount,'ref':c.reference}))
     items.sort(key=lambda x:(x[0],x[1]),reverse=True)
     return _page([x[2] for x in items],limit,offset)
 
@@ -140,9 +144,9 @@ def portal_statement_csv(org,party,start=None,end=None):
     data=portal_statement(org,party,start,end)
     fields=FIELDS[party.kind]
     buf=io.StringIO(newline='');w=csv.writer(buf,lineterminator='\r\n',quoting=csv.QUOTE_ALL)
-    w.writerow(['Statement',excel_safe(party.name)]);w.writerow(['Kind',party.kind]);w.writerow(['Generated at',datetime.now(timezone.utc).isoformat()])
-    w.writerow(['Period',f"{data['from'] or 'start'} to {data['to'] or 'now'}"]);w.writerow([])
-    w.writerow(['Month','Agreement','Vehicle']+[LABELS[f] for f in fields]+['Bill state'])
-    for r in data['rows']:w.writerow([r['month'],r['ref'],excel_safe(r['vehicle'])]+[str(r[f]) for f in fields]+[r['bill_state']])
-    t=data['totals'];w.writerow(['Total','','']+[str(t[f]) for f in fields]+[t['bill_state']])
+    w.writerow([translate('csv_statement'),excel_safe(party.name)]);w.writerow([translate('csv_kind'),word('party',party.kind)]);w.writerow([translate('csv_generated_at'),datetime.now(timezone.utc).isoformat()])
+    w.writerow([translate('csv_period'),translate('csv_period_range',{'from':data['from'] or translate('csv_start'),'to':data['to'] or translate('csv_now')})]);w.writerow([])
+    w.writerow([translate('col_month'),translate('col_agreement'),translate('col_vehicle')]+[LABELS(f) for f in fields]+[translate('col_bill')])
+    for r in data['rows']:w.writerow([r['month'],r['ref'],excel_safe(r['vehicle'])]+[str(r[f]) for f in fields]+[word('billstate',r['bill_state'])])
+    t=data['totals'];w.writerow([translate('col_total'),'','']+[str(t[f]) for f in fields]+[word('billstate',t['bill_state'])])
     return '﻿'+buf.getvalue()

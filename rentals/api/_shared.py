@@ -6,8 +6,11 @@ from django.db import IntegrityError
 from django.http import HttpRequest
 from ninja import Schema
 from ninja.errors import HttpError
+from .errors import ApiError
 from ..models import Membership, Party, Vehicle, Agreement, Period, Obligation, Expense, Contact, AgreementVersion, Invoice, Settlement, MaintenanceCase, Document, NotificationOutbox, Branch, DriverAgreement
 from .. import services, policies
+from ..services.settlement import show_label
+from ..i18n import word
 
 class PartyIn(Schema): kind:Literal['owner','driver','customer']; name:str; phone:str=''; email:str=''
 class VehicleIn(Schema): registration:str; model_name:str; owner_id:int; branch_id:int|None=None
@@ -55,13 +58,14 @@ class AssignDriverIn(Schema): driver_id:int; effective_from:date; salary_overrid
 class TransferOwnerIn(Schema): owner_id:int; effective_from:date
 class DraftIn(Schema): draft:bool=False
 class IdsIn(Schema): nid_number:str|None=None; driving_licence_number:str|None=None
-class PartyPatch(Schema): name:str|None=None; phone:str|None=None; email:str|None=None
+class PartyPatch(Schema): name:str|None=None; phone:str|None=None; email:str|None=None; language:Literal['en','bn']|None=None
 class ConsentIn(Schema): sms:bool|None=None; whatsapp:bool|None=None; email:bool|None=None; preferred_channel:str|None=None; source:str=''
 class ContactIn(Schema): name:str; phone:str=''; email:str=''; role:Literal['billing','operations','primary','other']='other'
 class AccessIn(Schema): username:str; branch_id:int|None=None
 class BranchIn(Schema): name:str
 class MemberPatch(Schema): role:Literal['admin','accountant','operations','viewer','mechanic']|None=None; branch_id:int|None=None; clear_branch:bool=False
 class LoginIn(Schema): username:str; password:str
+class PreferencesIn(Schema): language:Literal['en','bn']
 class RegisterIn(Schema): organization_name:str; username:str; email:str=''; password:str
 class QuickAgreementIn(Schema):
     customer:str; owner:str; driver:str=''; driver_id:int|None=None; vehicle:str; registration:str; start:date; end:date|None=None
@@ -80,14 +84,14 @@ def guard(member,model,*ids):
     wanted={i for i in ids if i is not None}
     if not wanted:return
     existing=model.objects.filter(pk__in=wanted)
-    if policies.branch_scope(member,existing).count()!=existing.count():raise HttpError(404,'Record not found')
+    if policies.branch_scope(member,existing).count()!=existing.count():raise ApiError(404, 'record_not_found')
 
 def membership(request:HttpRequest,org_id:int,action:str|None=None,**guards):
     """The caller's membership in org_id (404 if none, so other organizations stay invisible); `action` is checked against policies.
     Keyword guards (`period=id`, `obligations=[ids]`, see GUARD_MODELS) answer 404 for records outside a branch-limited member's branch."""
     member=Membership.objects.filter(organization_id=org_id,user=request.user).select_related('organization','branch').first()
-    if not member:raise HttpError(404,'Organization not found')
-    if action and not policies.can(member.role,action):raise HttpError(403,'Your role cannot perform this action')
+    if not member:raise ApiError(404, 'organization_not_found')
+    if action and not policies.can(member.role,action):raise ApiError(403, 'your_role_cannot_perform_this_action')
     for key,value in guards.items():guard(member,GUARD_MODELS[key],*(value if isinstance(value,(list,tuple,set)) else [value]))
     return member
 
@@ -97,22 +101,22 @@ def pick_branch(member,requested=None):
     if forced:return member.branch
     if requested:
         branch=Branch.objects.filter(pk=requested,organization_id=member.organization_id).first()
-        if not branch:raise HttpError(422,'Branch is invalid')
+        if not branch:raise ApiError(422, 'branch_is_invalid')
         return branch
     return member.branch or services.default_branch(member.organization)
 
 def result(fn,*args,**kwargs):
     try:return fn(*args,**kwargs)
-    except services.DomainError as exc:raise HttpError(422,str(exc)) from exc
-    except (DriverAgreement.DoesNotExist,Period.DoesNotExist,Agreement.DoesNotExist,Expense.DoesNotExist,Party.DoesNotExist,Vehicle.DoesNotExist,Obligation.DoesNotExist,Contact.DoesNotExist,AgreementVersion.DoesNotExist,Invoice.DoesNotExist,Settlement.DoesNotExist,MaintenanceCase.DoesNotExist,Document.DoesNotExist,Membership.DoesNotExist):raise HttpError(404,'Record not found')
-    except IntegrityError as exc:raise HttpError(409,'Duplicate or conflicting record') from exc
+    except services.DomainError as exc:raise ApiError(422, exc) from exc
+    except (DriverAgreement.DoesNotExist,Period.DoesNotExist,Agreement.DoesNotExist,Expense.DoesNotExist,Party.DoesNotExist,Vehicle.DoesNotExist,Obligation.DoesNotExist,Contact.DoesNotExist,AgreementVersion.DoesNotExist,Invoice.DoesNotExist,Settlement.DoesNotExist,MaintenanceCase.DoesNotExist,Document.DoesNotExist,Membership.DoesNotExist):raise ApiError(404, 'record_not_found')
+    except IntegrityError as exc:raise ApiError(409, 'duplicate_or_conflicting_record') from exc
 
 def agreement_dict(a):
     return {'id':a.pk,'vehicle':{'id':a.vehicle_id,'model_name':a.vehicle.model_name,'registration':a.vehicle.registration},'owner':{'id':a.vehicle.owner_id,'name':a.vehicle.owner.name},'customer':{'id':a.customer_id,'name':a.customer.name},'driver':{'id':a.driver_id,'name':a.driver.name} if a.driver_id and a.driver_provider!='none' else None,'start_date':a.start_date.isoformat(),'end_date':a.end_date.isoformat() if a.end_date else None,'customer_rent':str(a.customer_rent),'owner_rent':str(a.owner_rent),'driver_salary':str(a.driver_salary),'customer_rent_basis':a.customer_rent_basis,'owner_rent_basis':a.owner_rent_basis,'driver_salary_basis':a.driver_salary_basis,'payment_schedule':a.payment_schedule or {},'fuel_responsible':a.fuel_responsible,'repair_responsible':a.repair_responsible,'owner_offset_allowed':a.owner_offset_allowed,'driver_provider':a.driver_provider,'driver_paid_by':a.driver_paid_by,'clauses':a.clauses}
 
 def party_dict(p,sensitive=False):
     data={'id':p.pk,'kind':p.kind,'name':p.name,'phone':p.phone,'email':p.email}
-    if sensitive:data.update({'preferred_channel':p.preferred_channel,'consent':{'sms':p.consent_sms,'whatsapp':p.consent_whatsapp,'email':p.consent_email,'updated_at':p.consent_updated_at.isoformat() if p.consent_updated_at else None,'source':p.consent_source},'contacts':[{'id':c.pk,'name':c.name,'phone':c.phone,'email':c.email,'role':c.role} for c in p.contacts.all()]})
+    if sensitive:data.update({'language':p.language,'preferred_channel':p.preferred_channel,'consent':{'sms':p.consent_sms,'whatsapp':p.consent_whatsapp,'email':p.consent_email,'updated_at':p.consent_updated_at.isoformat() if p.consent_updated_at else None,'source':p.consent_source},'contacts':[{'id':c.pk,'name':c.name,'phone':c.phone,'email':c.email,'role':c.role} for c in p.contacts.all()]})
     return data
 
 def version_dict(v):
@@ -141,12 +145,19 @@ def agreement_detail(a):
 def charge_dict(c):
     return {'id':c.pk,'kind':c.kind,'direction':c.direction,'side':c.side,'party_id':c.party_id,'period_id':c.period_id,'amount':str(c.amount),'description':c.description,'reference':c.reference,'obligation_id':c.obligation_id,'quantity':str(c.quantity) if c.quantity is not None else None,'unit_rate':str(c.unit_rate) if c.unit_rate is not None else None}
 
+_KIND_BY_ENGLISH={label:value for value,label in Obligation.Kind.choices}
+
+def line_description(text):
+    """Invoice lines keep the English kind name they were saved with; show it in the user's language."""
+    kind=_KIND_BY_ENGLISH.get(text)
+    return word('kind',kind) if kind else text
+
 def invoice_dict(i,summary):
-    return {'id':i.pk,'number':i.number,'party_id':i.party_id,'period_id':i.period_id,'issue_date':i.issue_date.isoformat(),'due_date':i.due_date.isoformat(),'state':i.state,'status':summary['status'],'bill_state':summary['bill_state'],'amount':str(summary['amount']),'paid':str(summary['paid']),'outstanding':str(summary['outstanding']),'lines':[{'obligation_id':l.obligation_id,'description':l.description,'amount':str(l.amount)} for l in i.lines.all()]}
+    return {'id':i.pk,'number':i.number,'party_id':i.party_id,'period_id':i.period_id,'issue_date':i.issue_date.isoformat(),'due_date':i.due_date.isoformat(),'state':i.state,'status':summary['status'],'bill_state':summary['bill_state'],'amount':str(summary['amount']),'paid':str(summary['paid']),'outstanding':str(summary['outstanding']),'lines':[{'obligation_id':l.obligation_id,'description':line_description(l.description),'amount':str(l.amount)} for l in i.lines.all()]}
 
 def settlement_dict(s,lines=False):
     d={'id':s.pk,'period_id':s.period_id,'agreement_id':s.agreement_id,'month':s.month.isoformat(),'state':s.state,'version':s.version,'prepared_at':s.prepared_at.isoformat() if s.prepared_at else None,'approved_at':s.approved_at.isoformat() if s.approved_at else None,'closed_at':s.closed_at.isoformat() if s.closed_at else None,'reopen_reason':s.reopen_reason}
-    if lines:d['lines']=[{'section':l.section,'label':l.label,'amount':str(l.amount),'source_type':l.source_type,'source_id':l.source_id} for l in s.lines.all()]
+    if lines:d['lines']=[{'section':l.section,'code':show_label(l.label)[0],'label':show_label(l.label)[1],'amount':str(l.amount),'source_type':l.source_type,'source_id':l.source_id} for l in s.lines.all()]
     return d
 
 def case_dict(c):

@@ -131,7 +131,7 @@ class AgreementStatementTests(RangeBase):
 class ReportRangeTests(RangeBase):
     def test_balance_reports_add_an_opening_column_and_use_the_closing_balance(self):
         r=self.rep('customer-balances','?from=2026-09-25&to=2026-09-30')
-        self.assertEqual(r['columns'][4:],['Billed BDT','Received BDT','Outstanding BDT','Opening BDT'])
+        self.assertEqual(r['column_ids'][4:],['billed','received','money_to_take','opening'])
         self.assertEqual(r['rows'][0][4:],['20000.00','0.00','30000.00','10000.00']);self.assertEqual(r['bill_states'],['owed_to_us'])
         o=self.rep('owner-liability','?from=2026-09-25&to=2026-09-30');self.assertEqual(o['rows'][0][4:],['12000.00','0.00','0.00','12000.00','0.00'])
         d=self.rep('driver-payroll','?from=2026-09-25&to=2026-09-30');self.assertEqual((d['rows'][0][-1],d['rows'][0][-2]),('1000.00','5000.00'))
@@ -151,7 +151,7 @@ class ReportRangeTests(RangeBase):
         self.assertEqual(self.rep('customer-balances','?from=2026-09-01&to=2026-09-30')['count'],1)
 
     def test_no_filter_keeps_the_old_columns(self):
-        self.assertEqual(self.rep('customer-balances')['columns'][4:],['Billed BDT','Received BDT','Outstanding BDT'])
+        self.assertEqual(self.rep('customer-balances')['column_ids'][4:],['billed','received','money_to_take'])
 
     def test_aging_counts_balances_as_of_the_date(self):
         r=self.rep('customer-aging','?as_of=2026-09-15');self.assertEqual((r['rows'][0][1],r['rows'][0][-1]),('50000.00',0))   # half the month accrued, nothing paid yet
@@ -160,7 +160,7 @@ class ReportRangeTests(RangeBase):
 
     def test_export_carries_the_range_and_the_opening_column(self):
         r=self.c.get(f'{self.base}/reports/customer-balances/export?from=2026-09-25&to=2026-09-30');self.assertEqual(r.status_code,200)
-        text=r.content.decode('utf-8-sig');self.assertIn('from=2026-09-25',text);self.assertIn('to=2026-09-30',text);self.assertIn('Opening BDT',text);self.assertIn('10000.00',text)
+        text=r.content.decode('utf-8-sig');self.assertIn('from=2026-09-25',text);self.assertIn('to=2026-09-30',text);self.assertIn('Balance at the start (৳)',text);self.assertIn('10000.00',text)
 
     def test_query_count_is_constant_in_periods(self):
         services.issue_period(self.org,self.agreement.pk,date(2026,10,1))
@@ -171,5 +171,5 @@ class ReportRangeTests(RangeBase):
 
     def test_the_month_filters_keep_their_whole_month_meaning(self):
         legacy=self.rep('customer-balances','?month=2026-09-01');exact=self.rep('customer-balances','?from=2026-09-01&to=2026-09-30')
-        self.assertEqual(legacy['columns'][4:],['Billed BDT','Received BDT','Outstanding BDT'])                  # no opening column: still the period view
+        self.assertEqual(legacy['column_ids'][4:],['billed','received','money_to_take'])                  # no opening column: still the period view
         self.assertEqual(legacy['rows'][0][4:],exact['rows'][0][4:7])                                           # and the same figures for a whole month

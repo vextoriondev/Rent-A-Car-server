@@ -13,33 +13,34 @@ def default_branch(org):
 
 def update_party(org,party_id,data,actor=None):
     party=Party.objects.get(pk=party_id,organization=org)
-    before={'name':party.name,'phone':party.phone,'email':party.email}
+    before={'name':party.name,'phone':party.phone,'email':party.email,'language':party.language}
     for field in ('name','phone','email'):
         if data.get(field) is not None:setattr(party,field,data[field].strip())
-    if not party.name:raise DomainError('Name is required')
+    if data.get('language') in('en','bn'):party.language=data['language']   # the language of every message sent to this person (M17)
+    if not party.name:raise DomainError('name_is_required')
     party.save()
-    audit(org,actor,'party.update','party',party.pk,before=before,after={'name':party.name,'phone':party.phone,'email':party.email})
+    audit(org,actor,'party.update','party',party.pk,before=before,after={'name':party.name,'phone':party.phone,'email':party.email,'language':party.language})
     return party
 
 def set_consent(org,party_id,*,sms=None,whatsapp=None,email=None,preferred_channel=None,source='',actor=None):
     party=Party.objects.get(pk=party_id,organization=org)
     before={'preferred_channel':party.preferred_channel,'sms':party.consent_sms,'whatsapp':party.consent_whatsapp,'email':party.consent_email}
     if preferred_channel is not None:
-        if preferred_channel not in CHANNELS:raise DomainError('Unknown channel')
+        if preferred_channel not in CHANNELS:raise DomainError('unknown_channel')
         party.preferred_channel=preferred_channel
     for name,value in (('consent_sms',sms),('consent_whatsapp',whatsapp),('consent_email',email)):
         if value is not None:setattr(party,name,value)
     consented={'sms':party.consent_sms,'whatsapp':party.consent_whatsapp,'email':party.consent_email}
-    if party.preferred_channel!='none' and not consented[party.preferred_channel]:raise DomainError('Preferred channel needs consent')
+    if party.preferred_channel!='none' and not consented[party.preferred_channel]:raise DomainError('preferred_channel_needs_consent')
     party.consent_updated_at=timezone.now();party.consent_source=source[:120];party.save()
     audit(org,actor,'party.consent','party',party.pk,before=before,after={'preferred_channel':party.preferred_channel,'sms':party.consent_sms,'whatsapp':party.consent_whatsapp,'email':party.consent_email},reason=source)
     return party
 
 def add_contact(org,party_id,data,actor=None):
     party=Party.objects.get(pk=party_id,organization=org)
-    if not data['name'].strip():raise DomainError('Name is required')
+    if not data['name'].strip():raise DomainError('name_is_required')
     role=data.get('role','other')
-    if role not in Contact.Role.values:raise DomainError('Unknown contact role')
+    if role not in Contact.Role.values:raise DomainError('unknown_contact_role')
     contact=Contact.objects.create(party=party,name=data['name'].strip(),phone=data.get('phone',''),email=data.get('email',''),role=role)
     audit(org,actor,'party.contact_add','party',party.pk,after={'contact_id':contact.pk,'name':contact.name,'role':role})
     return contact
@@ -55,9 +56,9 @@ def grant_party_access(org,party_id,username,branch_id=None,actor=None):
     """Link an existing login to a party; the membership role mirrors the party kind so it can only ever be an actor."""
     party=Party.objects.get(pk=party_id,organization=org)
     user=get_user_model().objects.filter(username=username).first()
-    if not user:raise DomainError('User not found')
+    if not user:raise DomainError('user_not_found')
     member=Membership.objects.filter(organization=org,user=user).first()
-    if member and member.role!=party.kind:raise DomainError('That user already has a different role in this organization')
+    if member and member.role!=party.kind:raise DomainError('that_user_already_has_a_different_role')
     if not member:Membership.objects.create(organization=org,user=user,role=party.kind,branch_id=branch_id)
     link,_=PartyUser.objects.update_or_create(party=party,user=user,defaults={'organization':org,'active':True})
     audit(org,actor,'party.access_grant','party',party.pk,after={'user_id':user.pk,'role':party.kind})
@@ -69,7 +70,7 @@ def revoke_party_access(org,party_id,user_id,actor=None):
 
 def create_branch(org,name,actor=None):
     name=name.strip()
-    if not name:raise DomainError('Branch name is required')
+    if not name:raise DomainError('branch_name_is_required')
     branch=Branch.objects.create(organization=org,name=name)
     audit(org,actor,'branch.create','branch',branch.pk,after={'name':name})
     return branch
@@ -82,12 +83,12 @@ def update_member(org,actor,member_id,role=None,branch_id=None,clear_branch=Fals
     if not target:raise Membership.DoesNotExist
     before={'role':target.role,'branch_id':target.branch_id}
     if role is not None and role!=target.role:
-        if target.role=='admin' and not members.filter(role='admin').exclude(pk=target.pk).exists():raise DomainError('An organization needs at least one admin')
+        if target.role=='admin' and not members.filter(role='admin').exclude(pk=target.pk).exists():raise DomainError('an_organization_needs_at_least_one_admin')
         target.role=role
     if clear_branch:target.branch=None
     elif branch_id is not None:
         branch=Branch.objects.filter(pk=branch_id,organization=org).first()
-        if not branch:raise DomainError('Branch is invalid')
+        if not branch:raise DomainError('branch_is_invalid')
         target.branch=branch
     target.save()
     audit(org,actor,'member.update','membership',target.pk,before=before,after={'role':target.role,'branch_id':target.branch_id})
@@ -111,7 +112,7 @@ def set_party_ids(org,party_id,data,actor):
     for field in('nid_number','driving_licence_number'):
         if data.get(field) is not None:
             value=data[field].strip()
-            if len(value)>40:raise DomainError('An identity number may have at most 40 characters')
+            if len(value)>40:raise DomainError('an_identity_number_may_have_at_most')
             setattr(party,field,value)
     party.save(update_fields=['nid_number','driving_licence_number'])
     audit(org,actor,'party.ids_update','party',party.pk,before=before,after={'nid_number':mask_id(party.nid_number),'driving_licence_number':mask_id(party.driving_licence_number)})

@@ -31,19 +31,19 @@ class NoDriverTests(ReportBase):
 
     def test_a_driver_or_salary_is_refused_with_provider_none_and_a_driver_is_required_otherwise(self):
         o=self.owner;cu=self.customer;car=Vehicle.objects.create(organization=self.org,registration='X-1',model_name='M',owner=o)
-        with self.assertRaisesMessage(services.DomainError,'no driver'):
+        with self.assertErrorCode('a_vehicle_only_agreement_has_no_driver'):
             services.create_agreement(self.org,self.user,Agreement(organization=self.org,vehicle=car,customer=cu,driver=self.driver,start_date=date(2026,1,1),customer_rent=D(1),owner_rent=D(1),driver_salary=D(0),driver_provider='none'))
-        with self.assertRaisesMessage(services.DomainError,'no driver'):
+        with self.assertErrorCode('a_vehicle_only_agreement_has_no_driver'):
             services.create_agreement(self.org,self.user,Agreement(organization=self.org,vehicle=car,customer=cu,driver=None,start_date=date(2026,1,1),customer_rent=D(1),owner_rent=D(1),driver_salary=D(500),driver_provider='none'))
-        with self.assertRaisesMessage(services.DomainError,'needs a driver'):
+        with self.assertErrorCode('this_agreement_needs_a_driver_choose_no'):
             services.create_agreement(self.org,self.user,Agreement(organization=self.org,vehicle=car,customer=cu,driver=None,start_date=date(2026,1,1),customer_rent=D(1),owner_rent=D(1),driver_salary=D(500),driver_provider='operator'))
 
     def test_nothing_can_target_a_missing_driver(self):
         a,p=self.vehicle_only()
-        with self.assertRaisesMessage(services.DomainError,'no driver'):
+        with self.assertErrorCode('this_agreement_has_no_side'):
             services.post_charge(self.org,self.user,{'period_id':p.pk,'side':'driver','kind':'charge','amount':D(100),'description':'x'},'nd-1')
         for kw in({'responsible':'driver','paid_by':'operator'},{'responsible':'operator','paid_by':'driver'}):
-            with self.assertRaisesMessage(services.DomainError,'no driver'):self.expense('ND-E',100,date(2026,10,5),period=p,**kw)
+            with self.assertErrorCode('this_agreement_has_no_driver_so_a'):self.expense('ND-E',100,date(2026,10,5),period=p,**kw)
         # the operator can still record an expense for the owner or itself
         self.expense('ND-E2',100,date(2026,10,5),period=p)   # default rule: owner responsible, operator paid
 
@@ -69,7 +69,7 @@ class NoDriverTests(ReportBase):
     def test_adding_a_driver_later_by_revision_and_assignment(self):
         a,p=self.vehicle_only()
         services.revise_agreement(self.org,self.user,a.pk,date(2026,11,1),{'driver_provider':'operator','driver_paid_by':'operator','driver_salary':D(15000)},'driver joins')
-        with self.assertRaisesMessage(services.DomainError,'Assign a driver'):services.issue_period(self.org,a.pk,date(2026,11,1))
+        with self.assertErrorCode('assign_a_driver_before_issuing_this_month'):services.issue_period(self.org,a.pk,date(2026,11,1))
         services.assign_driver(self.org,self.user,a.pk,self.driver.pk,date(2026,11,1))
         p2=services.issue_period(self.org,a.pk,date(2026,11,1))
         self.assertEqual(services.statement(p2)['driver']['earned'],D(15000))

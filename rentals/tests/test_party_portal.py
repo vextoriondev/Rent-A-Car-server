@@ -139,7 +139,7 @@ class PortalExportTests(PortalBase):
         text=r.content.decode('utf-8');self.assertTrue(text.startswith('﻿'));self.assertIn('text/csv',r['Content-Type']);self.assertIn('no-store',r['Cache-Control'])
         rows=list(csv.reader(io.StringIO(text.lstrip('﻿'))))
         flat=[c for row in rows for c in row];self.assertIn('Meridian Textiles Ltd.',flat);self.assertIn('2026-09-01',flat);self.assertIn('100000.00',flat)
-        header=[row for row in rows if row and row[0]=='Month'][0];self.assertIn('Billed BDT',header)
+        header=[row for row in rows if row and row[0]=='Month'][0];self.assertIn('Billed (৳)',header)
         self.assertTrue(AuditEvent.objects.filter(action='party.portal_export',target_id=str(self.customer.pk)).exists())
 
     def test_export_has_only_the_partys_own_side_and_no_ids(self):

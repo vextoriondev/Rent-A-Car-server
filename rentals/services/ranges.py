@@ -9,14 +9,14 @@ def as_date(value):
     if value in(None,''):return None
     if isinstance(value,date):return value
     try:return date.fromisoformat(str(value))
-    except ValueError as exc:raise DomainError('Dates must be written as YYYY-MM-DD') from exc
+    except ValueError as exc:raise DomainError('dates_must_be_written_as_yyyy_mm') from exc
 
 def resolve_range(start=None,end=None):
     """(start, end) as dates; both optional, `end` inclusive. Rejects start > end and ranges over 5 years."""
     start,end=as_date(start),as_date(end)
     if start and end:
-        if start>end:raise DomainError('The start date is after the end date')
-        if (end-start).days>MAX_DAYS:raise DomainError('A range can span at most 5 years')
+        if start>end:raise DomainError('the_start_date_is_after_the_end')
+        if (end-start).days>MAX_DAYS:raise DomainError('a_range_can_span_at_most_5')
     return start,end
 
 def overlapping_periods(qs,start,end,field='month'):

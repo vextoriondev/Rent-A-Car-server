@@ -35,11 +35,11 @@ class DriverAgreementTests(ReportBase):
         self.assertTrue(AuditEvent.objects.filter(action='driver_agreement.create',target_id=str(da.pk)).exists());self.assertEqual(warnings,[])
 
     def test_validation(self):
-        with self.assertRaisesMessage(services.DomainError,'driver'):self.make(driver=self.owner)
-        with self.assertRaisesMessage(services.DomainError,'salary'):self.make(salary=0)
-        with self.assertRaisesMessage(services.DomainError,'End date'):self.make(end=date(2026,8,1))
+        with self.assertErrorCode('the_party_must_be_a_driver'):self.make(driver=self.owner)
+        with self.assertErrorCode('the_salary_must_be_above_zero'):self.make(salary=0)
+        with self.assertErrorCode('end_date_precedes_start_date'):self.make(end=date(2026,8,1))
         other=Party.objects.create(organization=Organization.objects.create(name='Other'),kind='driver',name='X')
-        with self.assertRaisesMessage(services.DomainError,'organization'):self.make(driver=other)
+        with self.assertErrorCode('driver_vehicle_and_branch_must_belong_to'):self.make(driver=other)
 
     def test_overlap_with_other_driver_work_warns_but_does_not_block(self):
         da,_=self.make(driver=self.driver)                                  # Imran is also the driver on the worked agreement
@@ -59,16 +59,16 @@ class DriverAgreementTests(ReportBase):
 
     def test_month_must_be_inside_the_agreement_dates(self):
         da,_=self.make(start=date(2026,9,1),end=date(2026,10,31))
-        with self.assertRaisesMessage(services.DomainError,'not effective'):self.issue(da,date(2026,8,1))
-        with self.assertRaisesMessage(services.DomainError,'not effective'):self.issue(da,date(2026,11,1))
-        with self.assertRaisesMessage(services.DomainError,'first day'):self.issue(da,date(2026,9,5))
+        with self.assertErrorCode('agreement_is_not_effective_this_month'):self.issue(da,date(2026,8,1))
+        with self.assertErrorCode('agreement_is_not_effective_this_month'):self.issue(da,date(2026,11,1))
+        with self.assertErrorCode('month_must_be_its_first_day'):self.issue(da,date(2026,9,5))
 
     def test_payments_advances_and_bill_states(self):
         da,_=self.make();p=self.issue(da)
         self.pay_driver(p,2000,'ADV-1',kind='salary_advance');self.pay_driver(p,10000,'PAY-1')
         s=services.statement(p);self.assertEqual((s['driver']['due'],s['driver']['advance'],s['driver']['paid'],s['driver']['bill_state']),(D(0),D(2000),D(12000),'paid'))
         self.reconciles(p)
-        with self.assertRaisesMessage(services.DomainError,'exceeds'):self.pay_driver(p,1,'PAY-2')
+        with self.assertErrorCode('payment_exceeds_an_open_obligation'):self.pay_driver(p,1,'PAY-2')
 
     def test_absence_and_fine_reduce_the_salary_and_other_sides_do_not_exist(self):
         da,_=self.make();p=self.issue(da)
@@ -76,16 +76,16 @@ class DriverAgreementTests(ReportBase):
         services.post_charge(self.org,self.user,{'period_id':p.pk,'side':'driver','kind':'fine','amount':D(300),'description':'traffic fine'},'da-fine')
         self.assertEqual(services.statement(p)['driver']['due'],D(12000)-D(800)-D(300));self.reconciles(p)
         for side in('customer','owner'):
-            with self.assertRaisesMessage(services.DomainError,f'no {side}'):services.post_charge(self.org,self.user,{'period_id':p.pk,'side':side,'kind':'charge','amount':D(10),'description':'x'},f'da-{side}')
+            with self.assertErrorCode('this_agreement_has_no_side'):services.post_charge(self.org,self.user,{'period_id':p.pk,'side':side,'kind':'charge','amount':D(10),'description':'x'},f'da-{side}')
         self.assertEqual(services.charge_suggestion(p,'absence_deduction',D(1))['unit_rate'],(D(12000)/30).quantize(D('0.01')))
 
     def test_vehicle_only_features_refuse_a_driver_period(self):
         da,_=self.make();p=self.issue(da)
-        with self.assertRaisesMessage(services.DomainError,'vehicle agreement'):
+        with self.assertErrorCode('expenses_are_recorded_on_a_vehicle_agreement'):
             services.record_expense(self.org,self.user,{'period_id':p.pk,'category':'fuel','amount':D(100),'paid_by':'operator','responsible':'operator','offset_owner':False,'reference':'E1','event_date':date(2026,9,5)},'e1')
-        with self.assertRaisesMessage(services.DomainError,'vehicle agreement'):services.issue_invoice(self.org,self.user,{'period_id':p.pk},'inv-1')
-        with self.assertRaisesMessage(services.DomainError,'vehicle agreement'):services.prepare_settlement(self.org,self.user,p.pk)
-        with self.assertRaisesMessage(services.DomainError,'vehicle agreement'):services.close_period(self.org,self.user,p.pk)
+        with self.assertErrorCode('invoices_belong_to_a_vehicle_agreement'):services.issue_invoice(self.org,self.user,{'period_id':p.pk},'inv-1')
+        with self.assertErrorCode('month_end_closing_applies_to_a_vehicle'):services.prepare_settlement(self.org,self.user,p.pk)
+        with self.assertErrorCode('month_end_closing_applies_to_a_vehicle'):services.close_period(self.org,self.user,p.pk)
 
     # ---- the vehicle books are untouched
     def test_worked_example_and_vehicle_reports_do_not_move(self):
@@ -116,14 +116,14 @@ class DriverAgreementTests(ReportBase):
         da,_=self.make();p1=self.issue(da)
         services.revise_driver_agreement(self.org,self.user,da.pk,date(2026,10,1),{'salary':D(15000)},'raise')
         self.assertEqual(self.issue(da,date(2026,10,1)).obligations.get().amount,D(15000));self.assertEqual(p1.obligations.get().amount,D(12000))
-        with self.assertRaisesMessage(services.DomainError,'already issued'):services.revise_driver_agreement(self.org,self.user,da.pk,date(2026,10,1),{'salary':D(16000)},'again')
-        with self.assertRaisesMessage(services.DomainError,'reason'):services.revise_driver_agreement(self.org,self.user,da.pk,date(2026,12,1),{'salary':D(1)},' ')
+        with self.assertErrorCode('periods_from_that_date_are_already_issued'):services.revise_driver_agreement(self.org,self.user,da.pk,date(2026,10,1),{'salary':D(16000)},'again')
+        with self.assertErrorCode('a_reason_is_required'):services.revise_driver_agreement(self.org,self.user,da.pk,date(2026,12,1),{'salary':D(1)},' ')
 
     def test_ending_the_agreement_stops_new_months(self):
         da,_=self.make();self.issue(da)
         services.update_driver_agreement(self.org,self.user,da.pk,{'end_date':date(2026,9,30)})
-        with self.assertRaisesMessage(services.DomainError,'not effective'):self.issue(da,date(2026,10,1))
-        with self.assertRaisesMessage(services.DomainError,'before'):services.update_driver_agreement(self.org,self.user,da.pk,{'end_date':date(2026,8,1)})
+        with self.assertErrorCode('agreement_is_not_effective_this_month'):self.issue(da,date(2026,10,1))
+        with self.assertErrorCode('the_end_date_cannot_be_before_the'):services.update_driver_agreement(self.org,self.user,da.pk,{'end_date':date(2026,8,1)})
 
     # ---- API and branches
     def test_api_round_trip(self):

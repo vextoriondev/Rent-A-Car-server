@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 from ninja import Router, Schema
 from ninja.errors import HttpError
+from .errors import ApiError
 from .. import policies, services
 from ..models import DriverAgreement, Party, Vehicle
 from ._shared import membership, pick_branch, result, paginate
@@ -27,7 +28,7 @@ def detail(da):
 
 def fetch(request,m,da_id):
     da=policies.scope_queryset(request.user,m,DriverAgreement.objects.all()).select_related('driver','vehicle').filter(pk=da_id,organization_id=m.organization_id).first()
-    if not da:raise HttpError(404,'Record not found')
+    if not da:raise ApiError(404, 'record_not_found')
     return da
 
 @router.get('/orgs/{org_id}/driver-agreements')
@@ -42,8 +43,8 @@ def create_driver_agreement(request,org_id:int,payload:DriverAgreementIn):
     m=membership(request,org_id,'agreement.write')
     driver=Party.objects.filter(pk=payload.driver_id,organization_id=org_id,kind=Party.Kind.DRIVER).first()
     vehicle=Vehicle.objects.filter(pk=payload.vehicle_id,organization_id=org_id).first() if payload.vehicle_id else None
-    if not driver or (payload.vehicle_id and not vehicle):raise HttpError(422,'Driver or vehicle is invalid')
-    if vehicle and not policies.branch_scope(m,Vehicle.objects.filter(pk=vehicle.pk)).exists():raise HttpError(404,'Record not found')
+    if not driver or (payload.vehicle_id and not vehicle):raise ApiError(422, 'driver_or_vehicle_is_invalid')
+    if vehicle and not policies.branch_scope(m,Vehicle.objects.filter(pk=vehicle.pk)).exists():raise ApiError(404, 'record_not_found')
     da=DriverAgreement(organization_id=org_id,driver=driver,vehicle=vehicle,start_date=payload.start_date,end_date=payload.end_date,salary=payload.salary,terms=payload.terms.strip(),branch=vehicle.branch if vehicle else pick_branch(m,payload.branch_id))
     da,warnings=result(services.create_driver_agreement,m.organization,request.user,da)
     return {**driver_agreement_dict(DriverAgreement.objects.select_related('driver','vehicle').get(pk=da.pk)),'warnings':warnings}

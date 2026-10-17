@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from django.db import transaction
 from django.db.models import Q
+from ..i18n import translate
 from ..models import Agreement, DriverAgreement, DriverAgreementVersion, Obligation, Organization, Party, Period
 from .audit import audit
 from .helpers import ZERO, DomainError, bd, journal
@@ -20,21 +21,21 @@ def check_driver_overlaps(da):
     end=da.end_date or date.max
     warnings=[]
     for o in DriverAgreement.objects.filter(organization_id=da.organization_id,driver_id=da.driver_id,active=True,start_date__lte=end).exclude(pk=da.pk).filter(Q(end_date__isnull=True)|Q(end_date__gte=da.start_date)):
-        warnings.append(f'Driver is also on driver agreement DRV-{o.pk} during this period')
+        warnings.append(translate('warning_driver_also_on_driver_agreement',{'ref':f'DRV-{o.pk}'}))
     for a in Agreement.objects.filter(organization_id=da.organization_id,driver_id=da.driver_id,active=True,start_date__lte=end).filter(Q(end_date__isnull=True)|Q(end_date__gte=da.start_date)):
-        warnings.append(f'Driver is also the driver on vehicle agreement AGR-{a.pk} during this period')
+        warnings.append(translate('warning_driver_also_on_vehicle_agreement',{'ref':f'AGR-{a.pk}'}))
     return warnings
 
 def _validate(da):
     org=da.organization_id
-    if da.driver.kind!='driver':raise DomainError('The party must be a driver')
-    if da.driver.organization_id!=org or (da.vehicle_id and da.vehicle.organization_id!=org) or (da.branch_id and da.branch.organization_id!=org):raise DomainError('Driver, vehicle and branch must belong to the organization')
-    if da.salary is None or da.salary<=0:raise DomainError('The salary must be above zero')
-    if da.end_date and da.end_date<da.start_date:raise DomainError('End date precedes start date')
+    if da.driver.kind!='driver':raise DomainError('the_party_must_be_a_driver')
+    if da.driver.organization_id!=org or (da.vehicle_id and da.vehicle.organization_id!=org) or (da.branch_id and da.branch.organization_id!=org):raise DomainError('driver_vehicle_and_branch_must_belong_to')
+    if da.salary is None or da.salary<=0:raise DomainError('the_salary_must_be_above_zero')
+    if da.end_date and da.end_date<da.start_date:raise DomainError('end_date_precedes_start_date')
 
 def _version_for(da,month):
     v=da.versions.filter(effective_from__lt=_first_on_or_after(month+timedelta(days=1))).order_by('-effective_from','-number').first()
-    if not v:raise DomainError('No driver agreement terms for this month')
+    if not v:raise DomainError('no_driver_agreement_terms_for_this_month')
     return v
 
 def _sync(da,today=None):
@@ -60,10 +61,10 @@ def update_driver_agreement(org,user,da_id,changes):
     da=DriverAgreement.objects.select_for_update(of=('self',)).select_related('driver').get(pk=da_id,organization=org)
     before={'end_date':da.end_date,'terms':da.terms}
     unknown=set(changes)-{'end_date','terms'}
-    if unknown:raise DomainError(f'Unknown fields: {sorted(unknown)}')
+    if unknown:raise DomainError('unknown_fields_sorted', sorted=sorted(unknown))
     if 'end_date' in changes:
         end=changes['end_date']
-        if end and end<da.start_date:raise DomainError('The end date cannot be before the start date')
+        if end and end<da.start_date:raise DomainError('the_end_date_cannot_be_before_the')
         da.end_date=end
         da.status='active' if not end or end>=date.today() else 'ended'
     if 'terms' in changes and changes['terms'] is not None:
@@ -76,17 +77,17 @@ def update_driver_agreement(org,user,da_id,changes):
 @transaction.atomic
 def revise_driver_agreement(org,user,da_id,effective_from,changes,reason):
     """A dated salary (or terms) change, applied from the month it starts; refused once a period from then on is issued."""
-    if not (reason or '').strip():raise DomainError('A reason is required')
+    if not (reason or '').strip():raise DomainError('a_reason_is_required')
     da=DriverAgreement.objects.select_for_update(of=('self',)).select_related('driver').get(pk=da_id,organization=org)
     start=_first_on_or_after(effective_from)
-    if da.end_date and start>da.end_date:raise DomainError('Revision starts after the agreement ends')
-    if Period.objects.filter(driver_agreement=da,month__gte=start).exists():raise DomainError('Periods from that date are already issued; use an explicit adjustment instead of a retroactive change')
+    if da.end_date and start>da.end_date:raise DomainError('revision_starts_after_the_agreement_ends')
+    if Period.objects.filter(driver_agreement=da,month__gte=start).exists():raise DomainError('periods_from_that_date_are_already_issued')
     unknown=set(changes)-{'salary','terms'}
-    if unknown:raise DomainError(f'Unknown terms: {sorted(unknown)}')
+    if unknown:raise DomainError('unknown_terms_sorted', sorted=sorted(unknown))
     previous=da.versions.filter(effective_from__lte=start).order_by('-effective_from','-number').first() or da.versions.order_by('-number').first()
     salary=bd(changes['salary']) if changes.get('salary') is not None else previous.salary
     terms=changes['terms'].strip() if changes.get('terms') is not None else previous.terms
-    if da.versions.filter(effective_from=start).exists():raise DomainError('A version already starts on that date')
+    if da.versions.filter(effective_from=start).exists():raise DomainError('a_version_already_starts_on_that_date')
     number=(da.versions.order_by('-number').values_list('number',flat=True).first() or 0)+1
     v=DriverAgreementVersion.objects.create(driver_agreement=da,number=number,effective_from=start,salary=salary,terms=terms,reason=reason.strip(),created_by=user)
     _sync(da)
@@ -97,8 +98,8 @@ def revise_driver_agreement(org,user,da_id,effective_from,changes,reason):
 def issue_driver_period(org,da_id,month,user=None):
     """Issue one month of salary for a standalone driver agreement. Idempotent per month."""
     da=DriverAgreement.objects.select_for_update(of=('self',)).select_related('driver','vehicle').get(pk=da_id,organization=org,active=True)
-    if month.day!=1:raise DomainError('Month must be its first day')
-    if month<da.start_date.replace(day=1) or (da.end_date and month>da.end_date.replace(day=1)):raise DomainError('Agreement is not effective this month')
+    if month.day!=1:raise DomainError('month_must_be_its_first_day')
+    if month<da.start_date.replace(day=1) or (da.end_date and month>da.end_date.replace(day=1)):raise DomainError('agreement_is_not_effective_this_month')
     existing=Period.objects.filter(organization=org,driver_agreement=da,month=month).first()
     if existing:return existing
     version=_version_for(da,month)

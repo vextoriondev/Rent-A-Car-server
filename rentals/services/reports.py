@@ -8,6 +8,7 @@ from decimal import Decimal
 from django.db.models import CharField, Count, Exists, OuterRef, Sum
 from django.db.models.functions import Cast
 from . import dues, ranged
+from ..i18n import translate, word
 from ..models import AgreementVersion, Allocation, Document, ExpenseCategory, Expense, Obligation, Payment, Period
 from ..policies import period_in_branch
 from .helpers import ZERO, DomainError
@@ -16,20 +17,33 @@ from .statements import bulk_ledger_statements
 
 # Column sets match the frontend's current CSV exports (lib/reports.ts).
 PERIOD_REPORTS={
-    'vehicle-contribution':{'title':'Vehicle contribution','party':'Customer','columns':['Earned rent','Owner gross','Driver salary','Operator costs','Accrual margin'],
+    'vehicle-contribution':{'party':'Customer','columns':['earned_rent','owner_share','driver_salary','your_costs','profit'],
         'values':lambda m,c:[m['customer']['billed'],m['owner']['gross'],m['driver']['earned'],m['operator']['operator_borne_costs'],m['operator']['accrual_margin']]},
-    'customer-balances':{'title':'Customer balances','party':'Customer','columns':['Billed','Received','Outstanding'],'values':lambda m,c:[m['customer']['billed'],m['customer']['received'],c['customer']['due']]},
-    'owner-liability':{'title':'Owner liability','party':'Owner','columns':['Gross','Offsets','Paid','Due'],'values':lambda m,c:[m['owner']['gross'],m['owner']['offsets'],m['owner']['paid'],c['owner']['due']]},
-    'driver-payroll':{'title':'Driver payroll','party':'Driver','columns':['Earned','Advance','Paid','Due'],'values':lambda m,c:[m['driver']['earned'],m['driver']['advance'],m['driver']['paid'],c['driver']['due']]},
-    'income':{'title':'Income','party':'Customer','columns':['Billed','Collected','Outstanding','Owner rent','Driver salary','Operator costs','Margin'],
+    'customer-balances':{'party':'Customer','columns':['billed','received','money_to_take'],'values':lambda m,c:[m['customer']['billed'],m['customer']['received'],c['customer']['due']]},
+    'owner-liability':{'party':'Owner','columns':['owner_rent','taken_off','paid','money_to_give'],'values':lambda m,c:[m['owner']['gross'],m['owner']['offsets'],m['owner']['paid'],c['owner']['due']]},
+    'driver-payroll':{'party':'Driver','columns':['earned','paid_early','paid','money_to_give'],'values':lambda m,c:[m['driver']['earned'],m['driver']['advance'],m['driver']['paid'],c['driver']['due']]},
+    'income':{'party':'Customer','columns':['billed','collected','money_to_take','owner_rent','driver_salary','your_costs','profit'],
         'values':lambda m,c:[m['customer']['billed'],m['customer']['received'],c['customer']['due'],m['owner']['gross'],m['driver']['earned'],m['operator']['operator_borne_costs'],m['operator']['accrual_margin']]},
-    'cash-movement':{'title':'Cash movement','party':'Customer','columns':['Receipts','Owner paid','Driver paid','Net cash'],'values':lambda m,c:[m['customer']['received'],m['owner']['paid'],m['driver']['paid'],m['operator']['recorded_cash_movement']]},
+    'cash-movement':{'party':'Customer','columns':['money_in','paid_owners','paid_drivers','cash_left'],'values':lambda m,c:[m['customer']['received'],m['owner']['paid'],m['driver']['paid'],m['operator']['recorded_cash_movement']]},
 }
-OTHER_REPORTS={'cost-by-responsible':'Cost by responsible party','customer-aging':'Customer aging','missing-receipts':'Missing receipts','entries':'Entries','daily-expenses':'Daily expenses','category-by-vehicle':'Cost category by vehicle'}
+OTHER_REPORTS=('cost-by-responsible','customer-aging','missing-receipts','entries','daily-expenses','category-by-vehicle')
 DRIVER_REPORTS={'driver-payroll','cash-movement'}   # reports that include standalone driver agreements
 BILL_SIDE={'customer-balances':'customer','owner-liability':'owner','driver-payroll':'driver'}
 REPORT_TYPES=list(PERIOD_REPORTS)+list(OTHER_REPORTS)
-AGING_BUCKETS=[('Current',0),('1-30 days',30),('31-60 days',60),('61-90 days',90),('Over 90 days',None)]
+AGING_BUCKETS=[('aging_current',0),('aging_1_30',30),('aging_31_60',60),('aging_61_90',90),('aging_over_90',None)]
+
+def report_title(slug:str)->str:
+    return translate('report_'+slug.replace('-','_'))
+
+def _heading(cid:str,kind:str)->str:
+    return translate('col_'+cid)+(' (৳)' if kind=='money' else '')
+
+def _columns(spec):
+    """[(id, type)] -> the response fields that describe the columns: headings in the user's language, stable ids and types (text, money, count, date)."""
+    return {'columns':[_heading(c,k) for c,k in spec],'column_ids':[c for c,_ in spec],'column_types':[k for _,k in spec]}
+
+def _totals(spec,values):
+    return {c:v for (c,k),v in zip(spec,values) if k in('money','count')}
 
 def _page(rows,limit,offset):
     if limit is None:return rows,None
@@ -85,7 +99,7 @@ def run_report(org,rtype,filters=None,limit=100,offset=0,as_of=None):
     if rtype=='entries':return _entries(org,f,limit,offset)
     if rtype=='daily-expenses':return _daily_expenses(org,f,limit,offset)
     if rtype=='category-by-vehicle':return _category_by_vehicle(org,f,limit,offset)
-    raise DomainError('Unknown report')
+    raise DomainError('unknown_report')
 
 def _period_report(org,rtype,f,limit,offset):
     cfg=PERIOD_REPORTS[rtype]
@@ -101,9 +115,9 @@ def _period_report(org,rtype,f,limit,offset):
         views={p.pk:(rs[p.pk]['movements'],rs[p.pk]['closing'],rs[p.pk]['opening']) for p in periods}
     else:
         stmts=bulk_ledger_statements(periods);views={p.pk:(stmts[p.pk],stmts[p.pk],None) for p in periods}
-    columns=['Agreement','Vehicle',cfg['party'],'Month']+[c+' BDT' for c in cfg['columns']]
+    spec=[('agreement','text'),('vehicle','text'),(cfg['party'].lower(),'text'),('month','date')]+[(c,'money') for c in cfg['columns']]
     opening_col=exact and side is not None   # balance reports also show where each balance stood on the first day
-    if opening_col:columns.append('Opening BDT')
+    if opening_col:spec.append(('opening','money'))
     width=len(cfg['columns'])+(1 if opening_col else 0)
     rows=[];states=[];totals=[ZERO]*width
     for p in periods:
@@ -115,8 +129,7 @@ def _period_report(org,rtype,f,limit,offset):
         if side:states.append(c[side]['bill_state'])
         rows.append([period_ref(p),_period_vehicle(p),names[p.pk][cfg['party'].lower()],p.month.isoformat()]+[_money(v) for v in vals])
     page,nxt=_page(rows,limit,offset)
-    cols=columns[4:]
-    out={'report':rtype,'title':cfg['title'],'columns':columns,'rows':page,'totals':dict(zip(cols,[_money(t) for t in totals])),'count':len(rows),'next':nxt,'filters':f}
+    out={'report':rtype,'title':report_title(rtype),**_columns(spec),'rows':page,'totals':_totals(spec[4:],[_money(t) for t in totals]),'count':len(rows),'next':nxt,'filters':f}
     if states:out['bill_states']=_page(states,limit,offset)[0]  # aligned with rows; the UI chooses the colours
     return out
 
@@ -137,9 +150,10 @@ def _expense_qs(org,f):
 
 def _cost_report(org,f,limit,offset):
     qs=_expense_qs(org,f).filter(state=Expense.State.POSTED).values('responsible','category').annotate(n=Count('id'),amount=Sum('amount')).order_by('responsible','category')
-    rows=[[r['responsible'].title(),r['category'].replace('_',' ').title(),r['n'],_money(r['amount'])] for r in qs]
+    rows=[[word('party',r['responsible']),word('category',r['category']),r['n'],_money(r['amount'])] for r in qs]
     total=sum((Decimal(r[3]) for r in rows),ZERO);page,nxt=_page(rows,limit,offset)
-    return {'report':'cost-by-responsible','title':OTHER_REPORTS['cost-by-responsible'],'columns':['Responsible','Category','Entries','Amount BDT'],'rows':page,'totals':{'Amount BDT':_money(total)},'count':len(rows),'next':nxt,'filters':f}
+    spec=[('responsible','text'),('category','text'),('entries','count'),('amount','money')]
+    return {'report':'cost-by-responsible','title':report_title('cost-by-responsible'),**_columns(spec),'rows':page,'totals':{'amount':_money(total)},'count':len(rows),'next':nxt,'filters':f}
 
 def _custom_due_dates(periods,as_of):
     """{agreement_id: oldest unpaid customer due date (or None when none is due yet)} for agreements whose schedule is not the month-end default."""
@@ -171,22 +185,23 @@ def _aging_report(org,f,limit,offset,as_of):
     rows=[[name]+[_money(v) for v in vals]+[_money(sum(vals,ZERO)),max(oldest[name],0)] for name,vals in sorted(buckets.items())]
     totals=[sum((v[i] for v in buckets.values()),ZERO) for i in range(len(AGING_BUCKETS))]
     page,nxt=_page(rows,limit,offset)
-    cols=['Customer']+[b+' BDT' for b,_ in AGING_BUCKETS]+['Total BDT','Days overdue']
-    return {'report':'customer-aging','title':OTHER_REPORTS['customer-aging'],'columns':cols,'rows':page,'totals':dict(zip(cols[1:-1],[_money(t) for t in totals]+[_money(sum(totals,ZERO))])),'count':len(rows),'next':nxt,'filters':{**f,'as_of':as_of.isoformat()}}
+    spec=[('customer','text')]+[(b,'money') for b,_ in AGING_BUCKETS]+[('total','money'),('days_overdue','count')]
+    return {'report':'customer-aging','title':report_title('customer-aging'),**_columns(spec),'rows':page,'totals':_totals(spec[1:-1],[_money(t) for t in totals]+[_money(sum(totals,ZERO))]),'count':len(rows),'next':nxt,'filters':{**f,'as_of':as_of.isoformat()}}
 
 def _missing_receipts(org,f,limit,offset):
     has_doc=Document.objects.filter(organization=org,target_type='expense',target_id=OuterRef('pk_str'))
     qs=_expense_qs(org,f).exclude(state__in=[Expense.State.REVERSED,Expense.State.DRAFT]).filter(receipt_reference='').select_related('period__agreement__vehicle')
     qs=qs.annotate(pk_str=Cast('pk',CharField())).annotate(has_doc=Exists(has_doc)).filter(has_doc=False).order_by('-event_date','-id')
-    rows=[[e.public_id,f'AGR-{e.period.agreement_id}',e.period.agreement.vehicle.registration,e.event_date.isoformat(),e.category.replace('_',' ').title(),_money(e.amount),e.reference,e.state.title()] for e in qs]
+    rows=[[e.public_id,f'AGR-{e.period.agreement_id}',e.period.agreement.vehicle.registration,e.event_date.isoformat(),word('category',e.category),_money(e.amount),e.reference,word('state',e.state)] for e in qs]
     page,nxt=_page(rows,limit,offset)
-    return {'report':'missing-receipts','title':OTHER_REPORTS['missing-receipts'],'columns':['ID','Agreement','Vehicle','Date','Category','Amount BDT','Reference','Status'],'rows':page,'totals':{'Amount BDT':_money(sum((Decimal(r[5]) for r in rows),ZERO))},'count':len(rows),'next':nxt,'filters':f}
+    spec=[('id','text'),('agreement','text'),('vehicle','text'),('date','date'),('category','text'),('amount','money'),('reference','text'),('status','text')]
+    return {'report':'missing-receipts','title':report_title('missing-receipts'),**_columns(spec),'rows':page,'totals':{'amount':_money(sum((Decimal(r[5]) for r in rows),ZERO))},'count':len(rows),'next':nxt,'filters':f}
 
 def _entries(org,f,limit,offset):
     """Same columns as the frontend entries export: ID, Agreement, Date, Type, Amount BDT, Paid by, Responsible, Status, Reference."""
     rows=[]
     for e in _expense_qs(org,f).exclude(state=Expense.State.DRAFT).select_related('period').order_by('-event_date','-id'):
-        rows.append((e.event_date,e.pk,[e.public_id,f'AGR-{e.period.agreement_id}',e.event_date.isoformat(),'Expense',_money(e.amount),e.paid_by.title(),e.responsible.title(),{'pending':'Pending approval','posted':'Posted','reversed':'Reversed'}[e.state],e.reference]))
+        rows.append((e.event_date,e.pk,[e.public_id,f'AGR-{e.period.agreement_id}',e.event_date.isoformat(),word('entrytype','expense'),_money(e.amount),word('party',e.paid_by),word('party',e.responsible),word('state',e.state),e.reference]))
     pq=Payment.objects.filter(organization=org)
     if f.get('branch_id'):pq=pq.filter(pk__in=Allocation.objects.filter(period_in_branch('obligation__period__',f['branch_id'])).values('payment_id'))
     pq=entry_dates(pq,as_date(f.get('from')),as_date(f.get('to'))).prefetch_related('allocations__obligation__period')
@@ -194,12 +209,13 @@ def _entries(org,f,limit,offset):
         periods={a.obligation.period for a in p.allocations.all()}
         if f.get('month') and not any(x.month==f['month'] for x in periods):continue
         if f.get('agreement_id') and not any(x.agreement_id==int(f['agreement_id']) for x in periods):continue
-        label={'customer_payment':'Customer payment','owner_payout':'Owner payout','driver_payout':'Driver payout','salary_advance':'Salary advance'}[p.kind]
+        label=word('entrytype',p.kind)
         agreement=','.join(sorted({period_ref(x) for x in periods}))
-        rows.append((p.event_date,p.pk,[p.public_id,agreement,p.event_date.isoformat(),label,_money(p.amount),p.party.name if p.kind=='customer_payment' else 'Operator','Operator','Posted',p.reference]))
+        rows.append((p.event_date,p.pk,[p.public_id,agreement,p.event_date.isoformat(),label,_money(p.amount),p.party.name if p.kind=='customer_payment' else word('party','operator'),word('party','operator'),word('state','posted'),p.reference]))
     rows.sort(key=lambda r:(r[0],r[1]),reverse=True);flat=[r[2] for r in rows]
     page,nxt=_page(flat,limit,offset)
-    return {'report':'entries','title':OTHER_REPORTS['entries'],'columns':['ID','Agreement','Date','Type','Amount BDT','Paid by','Responsible','Status','Reference'],'rows':page,'totals':{},'count':len(flat),'next':nxt,'filters':f}
+    spec=[('id','text'),('agreement','text'),('date','date'),('type','text'),('amount','money'),('paid_by','text'),('responsible','text'),('status','text'),('reference','text')]
+    return {'report':'entries','title':report_title('entries'),**_columns(spec),'rows':page,'totals':{},'count':len(flat),'next':nxt,'filters':f}
 
 def _has_receipt(qs,org):
     doc=Document.objects.filter(organization=org,target_type='expense',target_id=OuterRef('pk_str'))
@@ -207,30 +223,32 @@ def _has_receipt(qs,org):
 
 def _daily_expenses(org,f,limit,offset):
     """One row per expense recorded for the day (drafts excluded unless asked for by state); totals count posted expenses only so they reconcile to the ledger."""
-    if not f.get('date'):raise DomainError('A date is required')
+    if not f.get('date'):raise DomainError('a_date_is_required')
     qs=_has_receipt(_expense_qs(org,f),org).select_related('period__agreement__vehicle')
     if not f.get('state'):qs=qs.exclude(state=Expense.State.DRAFT)
     items=list(qs.order_by('id'))
-    rows=[[e.period.agreement.vehicle.registration,f'AGR-{e.period.agreement_id}',e.category.replace('_',' ').title(),_money(e.amount),e.paid_by.title(),e.responsible.title(),e.get_state_display(),e.reference,'Yes' if (e.receipt_reference or e.has_doc) else 'No'] for e in items]
+    rows=[[e.period.agreement.vehicle.registration,f'AGR-{e.period.agreement_id}',word('category',e.category),_money(e.amount),word('party',e.paid_by),word('party',e.responsible),word('state',e.state),e.reference,translate('yes') if (e.receipt_reference or e.has_doc) else translate('no')] for e in items]
     posted=[e for e in items if e.state==Expense.State.POSTED]
     def by(key):
         out={}
         for e in posted:out[key(e)]=out.get(key(e),ZERO)+e.amount
         return {k:_money(v) for k,v in sorted(out.items())}
     page,nxt=_page(rows,limit,offset)
-    return {'report':'daily-expenses','title':OTHER_REPORTS['daily-expenses'],'columns':['Vehicle','Agreement','Category','Amount BDT','Paid by','Responsible','State','Reference','Receipt'],'rows':page,'totals':{'Amount BDT':_money(sum((e.amount for e in posted),ZERO))},
-        'breakdowns':{'by_category':by(lambda e:e.category.replace('_',' ').title()),'by_responsible':by(lambda e:e.responsible.title())},'count':len(rows),'next':nxt,'filters':f}
+    spec=[('vehicle','text'),('agreement','text'),('category','text'),('amount','money'),('paid_by','text'),('responsible','text'),('status','text'),('reference','text'),('receipt','text')]
+    return {'report':'daily-expenses','title':report_title('daily-expenses'),**_columns(spec),'rows':page,'totals':{'amount':_money(sum((e.amount for e in posted),ZERO))},
+        'breakdowns':{'by_category':by(lambda e:word('category',e.category)),'by_responsible':by(lambda e:word('party',e.responsible))},'count':len(rows),'next':nxt,'filters':f}
 
 def _category_by_vehicle(org,f,limit,offset):
     """Posted cost of one category per vehicle for any range of entry dates; a deactivated category still works (history)."""
-    if not f.get('category'):raise DomainError('A category is required')
+    if not f.get('category'):raise DomainError('a_category_is_required')
     cat=ExpenseCategory.objects.filter(organization=org,code=f['category']).first()
-    if not cat:raise DomainError('Unknown expense category')
+    if not cat:raise DomainError('unknown_expense_category')
     qs=_expense_qs(org,{k:v for k,v in f.items() if k not in('state',)}).filter(state=Expense.State.POSTED)
     agg=qs.values('period__agreement__vehicle__registration','period__agreement__vehicle__model_name').annotate(n=Count('id'),amount=Sum('amount')).order_by('period__agreement__vehicle__registration')
     rows=[[r['period__agreement__vehicle__registration'],r['period__agreement__vehicle__model_name'],r['n'],_money(r['amount'])] for r in agg]
     total=sum((Decimal(r[3]) for r in rows),ZERO);page,nxt=_page(rows,limit,offset)
-    return {'report':'category-by-vehicle','title':OTHER_REPORTS['category-by-vehicle']+': '+cat.name,'columns':['Vehicle','Model','Entries','Amount BDT'],'rows':page,'totals':{'Amount BDT':_money(total)},'count':len(rows),'next':nxt,'filters':f}
+    spec=[('vehicle','text'),('model','text'),('entries','count'),('amount','money')]
+    return {'report':'category-by-vehicle','title':report_title('category-by-vehicle')+': '+cat.name,**_columns(spec),'rows':page,'totals':{'amount':_money(total)},'count':len(rows),'next':nxt,'filters':f}
 
 _FORMULA=re.compile(r'^(?:[=+@\t\r]|-(?![\d.]))')
 
@@ -243,11 +261,11 @@ def report_csv(org,rtype,filters=None,as_of=None):
     data=run_report(org,rtype,filters,limit=None,as_of=as_of)
     buf=io.StringIO(newline='');w=csv.writer(buf,lineterminator='\r\n',quoting=csv.QUOTE_ALL)
     now=datetime.now(timezone.utc).isoformat()
-    w.writerow(['Report',data['title']]);w.writerow(['Generated at',now])
-    w.writerow(['Filters','; '.join(f'{k}={v}' for k,v in sorted(data['filters'].items())) or 'none']);w.writerow([])
-    w.writerow(data['columns']+(['Generated at'] if rtype in PERIOD_REPORTS else []))
+    w.writerow([translate('csv_report'),data['title']]);w.writerow([translate('csv_generated_at'),now])
+    w.writerow([translate('csv_filters'),'; '.join(f'{k}={v}' for k,v in sorted(data['filters'].items())) or translate('csv_none')]);w.writerow([])
+    w.writerow(data['columns']+([translate('csv_generated_at')] if rtype in PERIOD_REPORTS else []))
     for r in data['rows']:w.writerow([excel_safe(c) for c in r]+([now] if rtype in PERIOD_REPORTS else []))
     for name,part in data.get('breakdowns',{}).items():
-        w.writerow([]);w.writerow([name.replace('_',' ').capitalize(),'Amount BDT'])
+        w.writerow([]);w.writerow([word('breakdown',name),_heading('amount','money')])
         for k,v in part.items():w.writerow([excel_safe(k),v])
     return '﻿'+buf.getvalue()

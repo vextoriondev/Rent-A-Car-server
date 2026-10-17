@@ -9,28 +9,28 @@ def record_payment(org,user,data,key):
     existing=replay(org,'payment',key,data,Payment)
     if existing:return existing
     kind=data['kind']
-    if kind not in Payment.Kind.values:raise DomainError('Unsupported payment kind')
+    if kind not in Payment.Kind.values:raise DomainError('unsupported_payment_kind')
     amount=bd(data['amount'])
     allocations=data['allocations']
-    if not allocations:raise DomainError('Choose at least one obligation')
-    if sum((bd(row['amount']) for row in allocations),ZERO)!=amount:raise DomainError('Allocations must equal the payment amount')
+    if not allocations:raise DomainError('choose_at_least_one_obligation')
+    if sum((bd(row['amount']) for row in allocations),ZERO)!=amount:raise DomainError('allocations_must_equal_the_payment_amount')
     ids=[row['obligation_id'] for row in allocations]
-    if len(ids)!=len(set(ids)):raise DomainError('Duplicate obligation allocation')
+    if len(ids)!=len(set(ids)):raise DomainError('duplicate_obligation_allocation')
     obligations=list(Obligation.objects.select_for_update(of=('self',)).select_related('period','party').filter(pk__in=ids,period__organization=org).order_by('pk'))
-    if len(obligations)!=len(ids):raise DomainError('Obligation does not exist in this organization')
+    if len(obligations)!=len(ids):raise DomainError('obligation_does_not_exist_in_this_organization')
     side={'customer_payment':'customer','owner_payout':'owner','driver_payout':'driver','salary_advance':'driver'}[kind]
     party_id=obligations[0].party_id
     for ob in obligations:
-        if ob.period.closed_at:raise DomainError('Period is closed; carry its balance forward and record the payment against the new opening balance')
-        if ob.party.kind!=side or ob.kind==Obligation.Kind.CARRY_OUT or ob.party_id!=party_id:raise DomainError('Allocation party, type or period is invalid')
+        if ob.period.closed_at:raise DomainError('period_closed_carry_forward')
+        if ob.party.kind!=side or ob.kind==Obligation.Kind.CARRY_OUT or ob.party_id!=party_id:raise DomainError('allocation_party_type_or_period_is_invalid')
         allocation_amount=bd(next(row['amount'] for row in allocations if row['obligation_id']==ob.pk))
         available=ob.amount-total(Allocation.objects.filter(obligation=ob))
         if ob.kind==Obligation.Kind.OWNER:available-=total(OwnerOffset.objects.filter(obligation=ob,expense__state=Expense.State.POSTED))
-        if allocation_amount>available:raise DomainError('Payment exceeds an open obligation')
+        if allocation_amount>available:raise DomainError('payment_exceeds_an_open_obligation')
     # credits, offsets and carried balances reduce what is owed below the sum of the obligations, so also cap per period by the ledger due
     for period in {ob.period_id:ob.period for ob in obligations}.values():
         part=sum((bd(row['amount']) for row in allocations if next(o for o in obligations if o.pk==row['obligation_id']).period_id==period.pk),ZERO)
-        if part>statement(period)[side]['due']:raise DomainError('Payment exceeds an open obligation')
+        if part>statement(period)[side]['due']:raise DomainError('payment_exceeds_an_open_obligation')
     payment=Payment.objects.create(organization=org,kind=kind,party_id=party_id,amount=amount,reference=data['reference'].strip(),method=data.get('method','bank'),note=(data.get('note') or '').strip()[:240],event_date=data['event_date'],recorded_by=user)
     Allocation.objects.bulk_create([Allocation(payment=payment,obligation_id=row['obligation_id'],amount=bd(row['amount'])) for row in allocations])
     by_id={ob.pk:ob for ob in obligations}

@@ -80,7 +80,7 @@ class IssuePeriodTests(RentalsTestCase):
     def test_an_end_date_prorates_the_last_month_and_refuses_the_next(self):
         a=self.make(date(2026,9,1),end=date(2026,10,10))
         self.assertEqual(self.amounts(services.issue_period(self.org,a.pk,date(2026,10,1)))['customer_rent'],D('9677.42'))          # 10 of 31 days
-        with self.assertRaisesMessage(services.DomainError,'not effective'):services.issue_period(self.org,a.pk,date(2026,11,1))
+        with self.assertErrorCode('agreement_is_not_effective_this_month'):services.issue_period(self.org,a.pk,date(2026,11,1))
 
     def test_each_side_can_have_its_own_basis(self):
         a=self.make(date(2026,2,1),end=date(2026,4,30),rent=1000,owner=60000,salary=18000,customer_rent_basis='per_day',owner_rent_basis='fixed_total',driver_salary_basis='per_month')
@@ -91,10 +91,10 @@ class IssuePeriodTests(RentalsTestCase):
         self.assertEqual(self.amounts(Period.objects.get(agreement=a,month=date(2026,3,1)))['customer_rent'],D('31000.00'))
 
     def test_fixed_total_needs_an_end_date(self):
-        with self.assertRaisesMessage(services.DomainError,'end date'):self.make(date(2026,2,1),customer_rent_basis='fixed_total')
+        with self.assertErrorCode('a_fixed_total_needs_an_end_date'):self.make(date(2026,2,1),customer_rent_basis='fixed_total')
 
     def test_unknown_basis_is_refused(self):
-        with self.assertRaisesMessage(services.DomainError,'basis'):self.make(date(2026,2,1),owner_rent_basis='per_week')
+        with self.assertErrorCode('unknown_rent_basis_basis_use_per_day'):self.make(date(2026,2,1),owner_rent_basis='per_week')
 
     def test_a_revision_mid_month_is_computed_in_segments(self):
         services.revise_agreement(self.org,self.user,self.agreement.pk,date(2026,10,15),{'driver_salary':'25000'},'Raise')
@@ -107,20 +107,20 @@ class IssuePeriodTests(RentalsTestCase):
 
     def test_a_revision_cannot_reach_into_an_issued_month_and_history_is_untouched(self):
         before=services.statement(self.period)
-        with self.assertRaisesMessage(services.DomainError,'already issued'):services.revise_agreement(self.org,self.user,self.agreement.pk,date(2026,9,20),{'owner_rent':'1'},'x')
+        with self.assertErrorCode('periods_from_that_date_are_already_issued_2'):services.revise_agreement(self.org,self.user,self.agreement.pk,date(2026,9,20),{'owner_rent':'1'},'x')
         self.assertEqual(services.statement(Period.objects.get(pk=self.period.pk)),before)
-        with self.assertRaisesMessage(services.DomainError,'before the agreement'):services.revise_agreement(self.org,self.user,self.agreement.pk,date(2025,12,1),{'owner_rent':'1'},'x')
+        with self.assertErrorCode('revision_starts_before_the_agreement_starts'):services.revise_agreement(self.org,self.user,self.agreement.pk,date(2025,12,1),{'owner_rent':'1'},'x')
 
     def test_revising_the_basis_applies_from_its_date(self):
         services.revise_agreement(self.org,self.user,self.agreement.pk,date(2026,10,1),{'customer_rent':'3500','customer_rent_basis':'per_day'},'Daily rate')
         self.assertEqual(self.amounts(services.issue_period(self.org,self.agreement.pk,date(2026,10,1)))['customer_rent'],D('108500.00'))   # 31 x 3,500
-        with self.assertRaisesMessage(services.DomainError,'end date'):services.revise_agreement(self.org,self.user,self.agreement.pk,date(2026,12,1),{'owner_rent_basis':'fixed_total'},'x')
+        with self.assertErrorCode('a_fixed_total_needs_an_end_date'):services.revise_agreement(self.org,self.user,self.agreement.pk,date(2026,12,1),{'owner_rent_basis':'fixed_total'},'x')
 
     def test_extending_and_ending_early_by_a_dated_revision_of_the_end_date(self):
         a=self.make(date(2026,9,1),end=date(2026,9,30))
         services.update_agreement_dates(self.org,self.user,a.pk,{'end_date':date(2026,11,15)})
         self.assertEqual(self.amounts(services.issue_period(self.org,a.pk,date(2026,11,1)))['customer_rent'],D('15000.00'))     # 15 of 30 days
-        with self.assertRaisesMessage(services.DomainError,'issued'):services.update_agreement_dates(self.org,self.user,a.pk,{'end_date':date(2026,10,10)})
+        with self.assertErrorCode('a_month_that_this_change_would_reprice'):services.update_agreement_dates(self.org,self.user,a.pk,{'end_date':date(2026,10,10)})
         b=self.make(date(2026,9,1),end=date(2026,9,30))
         services.update_agreement_dates(self.org,self.user,b.pk,{'end_date':None})                       # open-ended again: nothing was issued past the old end
         self.assertEqual(self.amounts(services.issue_period(self.org,b.pk,date(2026,12,1)))['customer_rent'],D('30000.00'))

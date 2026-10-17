@@ -65,7 +65,7 @@ class DocumentTests(M8Base):
         with self.assertRaises(services.DomainError):services.resolve_token(token[:-2]+'xx',self.user)         # tampered
         with override_settings(DOCUMENT_URL_MAX_AGE=-1):
             with self.assertRaises(services.DomainError) as ctx:services.resolve_token(token,self.user)
-        self.assertIn('expired',str(ctx.exception))
+        self.assertEqual(ctx.exception.code,'this_link_has_expired')
 
     def test_download_over_api_checks_token_user_and_org(self):
         d=self.upload('expense',self.expense().pk);c=self.as_role('accountant')
@@ -94,7 +94,7 @@ class DocumentTests(M8Base):
         october=services.issue_period(self.org,self.agreement.pk,date(2026,10,1))
         d=services.record_expense(self.org,self.user,{'period_id':october.pk,'category':'repair','amount':D(900),'paid_by':'operator','responsible':'owner','reference':'NEEDS-DOC','event_date':date(2026,10,3),'draft':True},'nd')
         with self.assertRaises(services.DomainError) as ctx:services.submit_expense(self.org,self.user,d.pk)
-        self.assertIn('receipt',str(ctx.exception))
+        self.assertEqual(ctx.exception.code,'a_receipt_is_required_for_this_category')
         self.upload('expense',d.pk)
         self.assertEqual(services.submit_expense(self.org,self.user,d.pk).state,'posted')
 

@@ -2,7 +2,9 @@ from datetime import date
 from decimal import Decimal
 from ninja import Router
 from ninja.errors import HttpError
+from .errors import ApiError
 from .. import policies, services
+from ..i18n import word
 from ..models import Account, Allocation, Charge, Invoice, Obligation, Period
 from ._shared import ChargeIn, InvoiceIn, ReasonIn, membership, result, charge_dict, invoice_dict, money_dict, paginate
 
@@ -23,7 +25,7 @@ def post_charge(request,org_id:int,payload:ChargeIn):
 def charge_suggestion(request,org_id:int,period_id:int,kind:str,quantity:Decimal=Decimal('1')):
     m=membership(request,org_id,'charge.post',period=period_id)
     p=Period.objects.select_related('agreement','agreement_version').filter(pk=period_id,organization=m.organization).first()
-    if not p:raise HttpError(404,'Period not found')
+    if not p:raise ApiError(404, 'period_not_found')
     return money_dict(result(services.charge_suggestion,p,kind,quantity))
 
 @router.get('/orgs/{org_id}/charges')
@@ -42,7 +44,7 @@ def carry_forward(request,org_id:int,period_id:int):
 def ledger(request,org_id:int,period_id:int):
     m=membership(request,org_id,'ledger.read',period=period_id)
     p=Period.objects.filter(pk=period_id,organization=m.organization).first()
-    if not p:raise HttpError(404,'Period not found')
+    if not p:raise ApiError(404, 'period_not_found')
     from ..models import JournalLine
     lines=JournalLine.objects.filter(period=p).select_related('entry').order_by('entry_id','id')
     stmt=services.ledger_statement(p)
@@ -53,13 +55,13 @@ def ledger(request,org_id:int,period_id:int):
 def obligations(request,org_id:int,period_id:int,side:str='customer'):
     """Positive obligations on one side of a period with what is still open on each (amount minus allocated), for payment splitting. Owner offsets are not subtracted here; the payment endpoint still enforces them."""
     m=membership(request,org_id,'read_financial',period=period_id)
-    if side not in ('customer','owner','driver'):raise HttpError(422,'Unknown side')
+    if side not in ('customer','owner','driver'):raise ApiError(422, 'unknown_side')
     p=Period.objects.filter(pk=period_id,organization=m.organization).first()
-    if not p:raise HttpError(404,'Period not found')
+    if not p:raise ApiError(404, 'period_not_found')
     rows=[];notes={c.obligation_id:c.description for c in Charge.objects.filter(period=p).exclude(obligation=None)}
     for o in Obligation.objects.filter(period=p,party__kind=side).exclude(kind='carry_out').order_by('pk'):
         paid=services.total(Allocation.objects.filter(obligation=o))
-        if o.amount>0:rows.append({'obligation_id':o.pk,'kind':o.kind,'description':o.get_kind_display()+(f': {notes[o.pk]}' if notes.get(o.pk) else ''),'amount':str(o.amount),'allocated':str(paid),'open_amount':str(max(o.amount-paid,0))})
+        if o.amount>0:rows.append({'obligation_id':o.pk,'kind':o.kind,'description':word('kind',o.kind)+(f': {notes[o.pk]}' if notes.get(o.pk) else ''),'amount':str(o.amount),'allocated':str(paid),'open_amount':str(max(o.amount-paid,0))})
     return rows
 
 @router.get('/orgs/{org_id}/periods/{period_id}/invoice-preview')
@@ -84,7 +86,7 @@ def invoices(request,org_id:int,period_id:int|None=None,branch_id:int|None=None,
 def invoice(request,org_id:int,invoice_id:int):
     m=membership(request,org_id,'read_financial',invoice=invoice_id)
     i=Invoice.objects.filter(pk=invoice_id,organization=m.organization).prefetch_related('lines').first()
-    if not i:raise HttpError(404,'Invoice not found')
+    if not i:raise ApiError(404, 'invoice_not_found')
     return invoice_dict(i,services.invoice_summary(i))
 
 @router.post('/orgs/{org_id}/invoices/{invoice_id}/void')

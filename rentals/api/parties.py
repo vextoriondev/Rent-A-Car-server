@@ -1,6 +1,7 @@
 from django.db import IntegrityError
 from ninja import Router
 from ninja.errors import HttpError
+from .errors import ApiError
 from .. import policies, services
 from ..models import Branch, Membership, Party, Vehicle
 from ._shared import PartyIn, PartyPatch, VehicleIn, ConsentIn, ContactIn, AccessIn, BranchIn, MemberPatch, IdsIn, membership, pick_branch, result, party_dict, paginate
@@ -21,7 +22,7 @@ def parties(request,org_id:int,kind:str|None=None,branch_id:int|None=None,limit:
 @router.post('/orgs/{org_id}/parties')
 def create_party(request,org_id:int,payload:PartyIn):
     membership(request,org_id,'party.write')
-    if not payload.name.strip():raise HttpError(422,'Name is required')
+    if not payload.name.strip():raise ApiError(422, 'name_is_required')
     p=Party.objects.create(organization_id=org_id,created_by=request.user,**payload.dict())
     return {'id':p.pk,'kind':p.kind,'name':p.name}
 
@@ -34,10 +35,10 @@ def vehicles(request,org_id:int,branch_id:int|None=None,limit:int=100,offset:int
 def create_vehicle(request,org_id:int,payload:VehicleIn):
     m=membership(request,org_id,'vehicle.write')
     owner=Party.objects.filter(pk=payload.owner_id,organization_id=org_id,kind=Party.Kind.OWNER).first()
-    if not owner:raise HttpError(422,'Owner is invalid')
+    if not owner:raise ApiError(422, 'owner_is_invalid')
     branch=pick_branch(m,payload.branch_id)
     try:v=Vehicle.objects.create(organization_id=org_id,registration=payload.registration.strip(),model_name=payload.model_name.strip(),owner=owner,branch=branch)
-    except IntegrityError:raise HttpError(409,'Registration already exists')
+    except IntegrityError:raise ApiError(409, 'registration_already_exists')
     return {'id':v.pk,'registration':v.registration,'model_name':v.model_name,'branch_id':v.branch_id}
 
 @router.patch('/orgs/{org_id}/parties/{party_id}')
@@ -74,17 +75,16 @@ def delete_contact(request,org_id:int,party_id:int,contact_id:int):
     result(services.delete_contact,m.organization,party_id,contact_id,request.user)
     return {'deleted':True}
 
-GONE="Owner, driver and customer logins are retired. Staff open each party's profile page instead (milestone M10)."
 
 @router.post('/orgs/{org_id}/parties/{party_id}/access')
 def grant_access(request,org_id:int,party_id:int,payload:AccessIn):
     membership(request,org_id,'access.manage')
-    raise HttpError(410,GONE)
+    raise ApiError(410, 'party_logins_retired')
 
 @router.delete('/orgs/{org_id}/parties/{party_id}/access/{user_id}')
 def revoke_access(request,org_id:int,party_id:int,user_id:int):
     membership(request,org_id,'access.manage')
-    raise HttpError(410,GONE)
+    raise ApiError(410, 'party_logins_retired')
 
 @router.get('/orgs/{org_id}/branches')
 def branches(request,org_id:int):

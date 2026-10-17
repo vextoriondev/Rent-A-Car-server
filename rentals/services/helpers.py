@@ -4,17 +4,26 @@ import json
 from decimal import Decimal, InvalidOperation  # noqa
 from django.db import transaction
 from django.db.models import Q
+from ..i18n import translate
 from ..models import Account, Agreement, Period, JournalEntry, JournalLine, NotificationOutbox, IdempotencyRecord
 
 ZERO=Decimal('0.00')
-class DomainError(Exception): pass
+class DomainError(Exception):
+    """A rule was broken. `code` names the sentence in the message catalog (rentals/locale); `params` fill its {names}.
+    `str(error)` is the sentence in the current language, so older callers that print it keep working."""
+    def __init__(self,code,**params):
+        super().__init__(code)
+        self.code=code
+        self.params=params
+    def __str__(self):
+        return translate(self.code,self.params)
 
 def bd(value):
     try:
         amount=Decimal(str(value))
         if not amount.is_finite() or amount<=0 or amount!=amount.quantize(Decimal('0.01')): raise ValueError
         return amount
-    except (InvalidOperation,ValueError): raise DomainError('Amount must be positive BDT with at most two decimals')
+    except (InvalidOperation,ValueError): raise DomainError('amount_must_be_positive_bdt_with_at')
 
 def total(qs,field='amount'):
     from django.db.models import Sum
@@ -24,10 +33,10 @@ def fingerprint(data):
     return hashlib.sha256(json.dumps(data,sort_keys=True,default=str).encode()).hexdigest()
 
 def replay(org,action,key,data,model):
-    if not key or len(key)>120: raise DomainError('A valid Idempotency-Key header is required')
+    if not key or len(key)>120: raise DomainError('a_valid_idempotency_key_header_is_required')
     record=IdempotencyRecord.objects.filter(organization=org,action=action,key=key).first()
     if not record:return None
-    if record.payload_hash!=fingerprint(data):raise DomainError('Idempotency key reused with a different request')
+    if record.payload_hash!=fingerprint(data):raise DomainError('idempotency_key_reused_with_a_different_request')
     return model.objects.get(pk=record.object_id)
 
 def remember(org,action,key,data,obj):
@@ -48,7 +57,7 @@ def journal(org,source_type,source_id,lines,period=None,event_date=None):
     Each line carries party/agreement/period/vehicle dimensions so the ledger can be read per period and party."""
     debit=sum((Decimal(str(l[1])) for l in lines),ZERO)
     credit=sum((Decimal(str(l[2])) for l in lines),ZERO)
-    if debit!=credit or debit<=0: raise DomainError('Journal is not balanced')
+    if debit!=credit or debit<=0: raise DomainError('journal_is_not_balanced')
     accounts=ensure_accounts(org)
     from datetime import date as _date
     entry=JournalEntry.objects.create(organization=org,source_type=source_type,source_id=str(source_id),event_date=event_date or _date.today())
@@ -74,27 +83,27 @@ def notice(org,event_key,party,event_type,payload):
 
 def validate_agreement(agreement):
     org=agreement.organization_id
-    if agreement.vehicle.organization_id!=org or agreement.vehicle.owner.organization_id!=org or agreement.customer.organization_id!=org or (agreement.driver_id and agreement.driver.organization_id!=org):raise DomainError('Agreement relationships must belong to the organization')
-    if agreement.vehicle.owner.kind!='owner' or agreement.customer.kind!='customer' or (agreement.driver_id and agreement.driver.kind!='driver'):raise DomainError('Party roles do not match agreement')
-    if agreement.end_date and agreement.end_date<agreement.start_date:raise DomainError('End date precedes start date')
+    if agreement.vehicle.organization_id!=org or agreement.vehicle.owner.organization_id!=org or agreement.customer.organization_id!=org or (agreement.driver_id and agreement.driver.organization_id!=org):raise DomainError('agreement_relationships_must_belong_to_the_organization')
+    if agreement.vehicle.owner.kind!='owner' or agreement.customer.kind!='customer' or (agreement.driver_id and agreement.driver.kind!='driver'):raise DomainError('party_roles_do_not_match_agreement')
+    if agreement.end_date and agreement.end_date<agreement.start_date:raise DomainError('end_date_precedes_start_date')
     from . import dues, rent_calc
     agreement.payment_schedule=dues.normalize_schedule(agreement.payment_schedule)
     for basis,amount in ((agreement.customer_rent_basis,agreement.customer_rent),(agreement.owner_rent_basis,agreement.owner_rent),(agreement.driver_salary_basis,agreement.driver_salary)):
         rent_calc.build_segments([(agreement.start_date,basis,amount)],agreement.start_date,agreement.end_date)   # unknown basis, or a fixed total without an end date
     if agreement.branch_id is None:agreement.branch_id=agreement.vehicle.branch_id
-    if agreement.branch_id!=agreement.vehicle.branch_id:raise DomainError("An agreement must be in the same branch as its vehicle")
+    if agreement.branch_id!=agreement.vehicle.branch_id:raise DomainError('an_agreement_must_be_in_the_same')
     clash=Agreement.objects.filter(vehicle_id=agreement.vehicle_id,active=True).exclude(pk=agreement.pk).filter(Q(end_date__isnull=True)|Q(end_date__gte=agreement.start_date))
     if agreement.end_date:clash=clash.filter(start_date__lte=agreement.end_date)
-    if clash.exists():raise DomainError('Vehicle has an overlapping active agreement')
+    if clash.exists():raise DomainError('vehicle_has_an_overlapping_active_agreement')
     if agreement.driver_provider=='none':
-        if agreement.driver_id or agreement.driver_salary!=0:raise DomainError('A vehicle-only agreement has no driver and no salary; the driver is on a separate driver agreement')
+        if agreement.driver_id or agreement.driver_salary!=0:raise DomainError('a_vehicle_only_agreement_has_no_driver')
     else:
-        if agreement.driver_provider not in('operator','owner','customer') or agreement.driver_paid_by not in('operator','owner','customer'):raise DomainError('The driver provider and the party paying the driver must each be operator, owner, customer or none (no driver)')
-        if not agreement.driver_id:raise DomainError('This agreement needs a driver; choose "no driver" for a vehicle-only agreement')
-    if any(x<=0 for x in [agreement.customer_rent,agreement.owner_rent]) or agreement.driver_salary<0 or (agreement.driver_provider!='none' and agreement.driver_paid_by=='operator' and agreement.driver_salary<=0):raise DomainError('Monthly terms must be positive')
+        if agreement.driver_provider not in('operator','owner','customer') or agreement.driver_paid_by not in('operator','owner','customer'):raise DomainError('the_driver_provider_and_the_party_paying')
+        if not agreement.driver_id:raise DomainError('this_agreement_needs_a_driver_choose_no')
+    if any(x<=0 for x in [agreement.customer_rent,agreement.owner_rent]) or agreement.driver_salary<0 or (agreement.driver_provider!='none' and agreement.driver_paid_by=='operator' and agreement.driver_salary<=0):raise DomainError('monthly_terms_must_be_positive')
 
 def locked_period(org,period_id):
     period=Period.objects.select_for_update(of=('self',)).select_related('agreement','agreement__vehicle','agreement__customer','agreement__driver','agreement__vehicle__owner').get(pk=period_id,organization=org)
-    if period.closed_at: raise DomainError('Period is closed; use an authorized adjustment workflow')
-    if not period.agreement_id:raise DomainError('Expenses are recorded on a vehicle agreement; this is a driver agreement')
+    if period.closed_at: raise DomainError('period_closed_adjustment')
+    if not period.agreement_id:raise DomainError('expenses_are_recorded_on_a_vehicle_agreement')
     return period

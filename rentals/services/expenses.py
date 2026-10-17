@@ -25,10 +25,10 @@ def ensure_categories(org):
 
 def create_category(org,code,name):
     code=code.strip().lower().replace(' ','_')
-    if not code or not name.strip():raise DomainError('Code and name are required')
+    if not code or not name.strip():raise DomainError('code_and_name_are_required')
     ensure_categories(org)
     cat,created=ExpenseCategory.objects.get_or_create(organization=org,code=code,defaults={'name':name.strip()})
-    if not created:raise DomainError('Category already exists')
+    if not created:raise DomainError('category_already_exists')
     return cat
 
 @transaction.atomic
@@ -38,7 +38,7 @@ def update_category(org,user,category_id,data):
     before={'name':cat.name,'active':cat.active}
     name=data.get('name');active=data.get('active')
     if name is not None:
-        if not name.strip():raise DomainError('A category needs a name')
+        if not name.strip():raise DomainError('a_category_needs_a_name')
         cat.name=name.strip()
     if active is not None:cat.active=active
     cat.save(update_fields=['name','active'])
@@ -65,28 +65,28 @@ def _prepare(org,p,data,can_override,exclude_pk=None):
         gone=ExpenseCategory.objects.filter(organization=org,code=category,active=False).first()
         raise DomainError(f'The category "{gone.name}" is deactivated and cannot be used for new expenses' if gone else 'Unsupported expense category')
     liable=data['responsible']
-    if liable not in PARTIES:raise DomainError('Unsupported responsible party')
+    if liable not in PARTIES:raise DomainError('unsupported_responsible_party')
     paid_by=data['paid_by']
-    if paid_by not in PARTIES:raise DomainError('Unsupported paying party')
-    if 'driver' in (liable,paid_by) and not p.obligations.filter(kind='driver_salary').exists():raise DomainError('This agreement has no driver, so a driver cannot pay or be responsible for a cost')
+    if paid_by not in PARTIES:raise DomainError('unsupported_paying_party')
+    if 'driver' in (liable,paid_by) and not p.obligations.filter(kind='driver_salary').exists():raise DomainError('this_agreement_has_no_driver_so_a')
     reference=data['reference'].strip()
-    if not reference:raise DomainError('Reference is required')
+    if not reference:raise DomainError('reference_is_required')
     resolved=resolve_rule(p,category)
     override_reason=(data.get('override_reason') or '').strip()
     overridden=False
     if resolved['responsible'] and liable!=resolved['responsible']:
-        if not override_reason:raise DomainError('Agreement expense rule differs; create an approved revision first')
-        if not can_override:raise DomainError('Overriding the agreement rule requires permission')
+        if not override_reason:raise DomainError('expense_rule_differs')
+        if not can_override:raise DomainError('override_needs_permission')
         overridden=True
     offset=bool(data.get('offset_owner'))
     terms=period_terms(p)
     deductible=resolved['deductible_from']!='none'
-    if offset and not (liable=='owner' and paid_by=='operator' and terms.owner_offset_allowed and deductible):raise DomainError('Owner offset is not authorized')
+    if offset and not (liable=='owner' and paid_by=='operator' and terms.owner_offset_allowed and deductible):raise DomainError('owner_offset_is_not_authorized')
     duplicate_reason=(data.get('allow_duplicate_reason') or '').strip()
     event_date=data.get('event_date',p.month)
     clones=Expense.objects.filter(period__organization=org).exclude(state=Expense.State.REVERSED).exclude(pk=exclude_pk)
     twin=clones.filter(period__agreement=p.agreement,amount=amount,event_date=event_date,category=category).first() or clones.filter(reference=reference).exclude(period=p).first()
-    if twin and not duplicate_reason:raise DomainError(f'Possible duplicate of {twin.public_id}; give allow_duplicate_reason to record it anyway')
+    if twin and not duplicate_reason:raise DomainError('possible_duplicate', public_id=twin.public_id)
     fields={'category':category,'category_ref':cat,'amount':amount,'event_date':event_date,'paid_by':paid_by,'responsible':liable,'offset_owner':offset,'reference':reference,'description':data.get('description',''),'receipt_reference':(data.get('receipt_reference') or '').strip(),'rule':resolved['rule'],
         'override_reason':override_reason if overridden else '','duplicate_reason':duplicate_reason if twin else '',
         'rule_snapshot':{'source':resolved['source'],'rule_id':resolved['rule'].pk if resolved['rule'] else None,'category':category,'responsible':resolved['responsible'],'first_payer':resolved['first_payer'],'deductible_from':resolved['deductible_from'],'proof_required':resolved['proof_required'],'approval_threshold':str(resolved['threshold']),
@@ -97,7 +97,7 @@ def _require_proof(fields,resolved,expense=None):
     """Proof is a receipt reference or, once the expense exists, an uploaded document."""
     if not resolved['proof_required'] or fields['receipt_reference']:return
     if expense is not None and Document.objects.filter(organization=expense.period.organization,target_type='expense',target_id=str(expense.pk)).exists():return
-    raise DomainError('A receipt is required for this category: upload a document or give a receipt reference')
+    raise DomainError('a_receipt_is_required_for_this_category')
 
 def _route(expense,user,resolved,overridden):
     """Below threshold (and not an override) posts immediately; otherwise it waits for an approval record."""
@@ -109,14 +109,14 @@ def _route(expense,user,resolved,overridden):
 
 def post_expense_locked(expense,approver=None):
     p=expense.period
-    if p.closed_at:raise DomainError('Period is closed')
+    if p.closed_at:raise DomainError('period_closed')
     if expense.state==Expense.State.POSTED:return expense
-    if expense.state==Expense.State.REVERSED:raise DomainError('Cannot post a reversed expense')
-    if expense.state==Expense.State.DRAFT:raise DomainError('Submit the draft before posting it')
+    if expense.state==Expense.State.REVERSED:raise DomainError('cannot_post_a_reversed_expense')
+    if expense.state==Expense.State.DRAFT:raise DomainError('submit_the_draft_before_posting_it')
     if expense.offset_owner:
         owner_ob=Obligation.objects.select_for_update().get(period=p,kind=Obligation.Kind.OWNER)
         current=statement(p)['owner']['due']
-        if expense.amount>current:raise DomainError('Offset exceeds unpaid owner balance')
+        if expense.amount>current:raise DomainError('offset_exceeds_unpaid_owner_balance')
         OwnerOffset.objects.create(expense=expense,obligation=owner_ob,amount=expense.amount)
     expense.state=Expense.State.POSTED
     expense.approved_by=approver
@@ -156,8 +156,8 @@ def _case_for(org,period,data):
     cid=data.get('maintenance_case_id')
     if not cid:return None
     case=MaintenanceCase.objects.get(pk=cid,organization=org)
-    if case.vehicle_id!=period.agreement.vehicle_id:raise DomainError('The maintenance case is for a different vehicle')
-    if case.status not in('approved','in_progress','done'):raise DomainError('Approve the maintenance case before booking cost against it')
+    if case.vehicle_id!=period.agreement.vehicle_id:raise DomainError('the_maintenance_case_is_for_a_different')
+    if case.status not in('approved','in_progress','done'):raise DomainError('approve_the_maintenance_case_before_booking_cost')
     return case
 
 def _target_period(org,data):
@@ -166,10 +166,10 @@ def _target_period(org,data):
     period=Period.objects.select_for_update(of=('self',)).select_related('agreement','agreement_version').get(pk=data['period_id'],organization=org)
     if not period.closed_at:return period,None
     nxt=(period.month.replace(day=28)+timedelta(days=4)).replace(day=1)
-    if not data.get('late_entry'):raise DomainError(f'Period is closed; resubmit with late_entry=true to post it as an adjustment in {nxt:%Y-%m}')
+    if not data.get('late_entry'):raise DomainError('period_closed_late_entry', nxt=format(nxt,'%Y-%m'))
     target=Period.objects.select_for_update(of=('self',)).select_related('agreement','agreement_version').filter(organization=org,agreement=period.agreement,month=nxt).first()
-    if not target:raise DomainError(f'Issue {nxt:%Y-%m} first, then post the late entry as an adjustment there')
-    if target.closed_at:raise DomainError(f'{nxt:%Y-%m} is closed too; reopen it or post the entry in a later open period')
+    if not target:raise DomainError('issue_nxt_first_then_post_the_late', nxt=format(nxt,'%Y-%m'))
+    if target.closed_at:raise DomainError('nxt_is_closed_too_reopen_it_or', nxt=format(nxt,'%Y-%m'))
     return target,period
 
 @transaction.atomic
@@ -178,7 +178,7 @@ def record_expense(org,user,data,key,can_override=False):
     existing=replay(org,'expense',key,data,Expense)
     if existing:return existing
     p,adjusts=_target_period(org,data)
-    if not p.agreement_id:raise DomainError('Expenses are recorded on a vehicle agreement; this is a driver agreement')
+    if not p.agreement_id:raise DomainError('expenses_are_recorded_on_a_vehicle_agreement')
     fields,resolved,overridden=_prepare(org,p,data,can_override)
     if adjusts:fields['description']=f"Late entry for {adjusts.month:%Y-%m}: {fields['description']}".strip()
     draft=bool(data.get('draft'))
@@ -192,7 +192,7 @@ def record_expense(org,user,data,key,can_override=False):
 
 def _locked_draft(org,expense_id):
     expense=Expense.objects.select_for_update(of=('self',)).select_related('period').get(pk=expense_id,period__organization=org)
-    if expense.state!=Expense.State.DRAFT:raise DomainError('Only drafts can be changed; posted entries are corrected by reversal')
+    if expense.state!=Expense.State.DRAFT:raise DomainError('only_drafts_can_be_changed_posted_entries')
     return expense,locked_period(org,expense.period_id)
 
 @transaction.atomic
@@ -242,10 +242,10 @@ def approve_expense(org,user,expense_id):
 @transaction.atomic
 def reverse_expense(org,user,expense_id,reason):
     """The original keeps its amount and links to a mirror-image journal entry; balances are derived from POSTED rows only."""
-    if not reason.strip():raise DomainError('Reversal reason is required')
+    if not reason.strip():raise DomainError('reversal_reason_is_required')
     expense=Expense.objects.select_for_update(of=('self',)).select_related('period').get(pk=expense_id,period__organization=org)
     locked_period(org,expense.period_id)
-    if expense.state!=Expense.State.POSTED:raise DomainError('Only posted expenses can be reversed')
+    if expense.state!=Expense.State.POSTED:raise DomainError('only_posted_expenses_can_be_reversed')
     before=snap(expense,EXP_FIELDS)
     _unbook(expense,user)
     expense.state=Expense.State.REVERSED

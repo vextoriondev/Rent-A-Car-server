@@ -48,7 +48,7 @@ class DataModelTests(BranchBase):
     def test_agreement_branch_must_equal_vehicle_branch(self):
         car=Vehicle.objects.create(organization=self.org,registration='X-1',model_name='M',owner=self.owner,branch=self.main)
         bad=Agreement(organization=self.org,vehicle=car,customer=self.customer,driver=self.driver,branch=self.sylhet,start_date=date(2026,1,1),customer_rent=D(10),owner_rent=D(5),driver_salary=D(1))
-        with self.assertRaisesMessage(services.DomainError,'same branch'):services.create_agreement(self.org,self.user,bad)
+        with self.assertErrorCode('an_agreement_must_be_in_the_same'):services.create_agreement(self.org,self.user,bad)
         r=self.login('acc_main').post(f'{self.base}/agreements',{'vehicle_id':car.pk,'customer_id':self.customer.pk,'driver_id':self.driver.pk,'start_date':'2026-01-01','customer_rent':'10','owner_rent':'5','driver_salary':'1','branch_id':self.sylhet.pk},content_type='application/json')
         self.assertEqual(r.status_code,422)
 
@@ -106,7 +106,7 @@ class ScopeTests(BranchBase):
     def test_snapshot_notice_detail_is_readable_text(self):
         details=[n['detail'] for n in self.get('admin_all','/snapshot?month=2026-09-01').json()['notices']]
         self.assertTrue(details);self.assertTrue(all('{' not in d and "'" not in d for d in details),details)
-        self.assertIn('Rent issued for period',' '.join(details))
+        self.assertIn('Rent was billed',' '.join(details))
 
     def test_snapshot_is_scoped_and_admin_can_pick_a_branch(self):
         snap=lambda who,q='':self.get(who,f'/snapshot?month=2026-09-01{q}').json()
@@ -211,7 +211,7 @@ class MemberAdminTests(BranchBase):
 
     def test_party_access_endpoints_are_gone(self):
         c=self.login('admin_all')
-        r=c.post(f'{self.base}/parties/{self.owner.pk}/access',{'username':'x'},content_type='application/json');self.assertEqual(r.status_code,410);self.assertIn('M10',r.json()['detail'])
+        r=c.post(f'{self.base}/parties/{self.owner.pk}/access',{'username':'x'},content_type='application/json');self.assertEqual(r.status_code,410);self.assertEqual(r.json()['code'],'party_logins_retired')
         self.assertEqual(c.delete(f'{self.base}/parties/{self.owner.pk}/access/1').status_code,410)
 
     def test_me_names_the_branch_and_branches_list_is_narrowed(self):

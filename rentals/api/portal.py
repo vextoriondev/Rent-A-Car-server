@@ -2,11 +2,12 @@ from datetime import date
 from django.http import HttpResponse
 from ninja import Field, Query, Router, Schema
 from ninja.errors import HttpError
+from .errors import ApiError
 from .. import policies, services
 from ..models import Party
 from ..services import portal as portal_service
 from ._shared import document_dict, membership, money_dict, result
-from .snapshot import notice_text
+from .snapshot import notice_text, notice_title
 
 router = Router()
 
@@ -17,7 +18,7 @@ def open_party(request,org_id,party_id,section):
     """The staff member, the party (404 across organizations and branches) and an audit row: every view of a page is logged."""
     m=membership(request,org_id,'party.portal',party=party_id)
     party=policies.scope_queryset(request.user,m,Party.objects.filter(organization_id=org_id)).prefetch_related('contacts').filter(pk=party_id).first()
-    if not party:raise HttpError(404,'Record not found')
+    if not party:raise ApiError(404, 'record_not_found')
     services.audit(m.organization,request.user,'sensitive.read','party_portal',party.pk,after={'section':section,'kind':party.kind})
     return m,party
 
@@ -35,7 +36,7 @@ def statement(request,org_id:int,party_id:int,q:RangeQuery=Query(...)):
 def statement_export(request,org_id:int,party_id:int,q:RangeQuery=Query(...)):
     m=membership(request,org_id,'export',party=party_id)
     party=policies.scope_queryset(request.user,m,Party.objects.filter(organization_id=org_id)).filter(pk=party_id).first()
-    if not party:raise HttpError(404,'Record not found')
+    if not party:raise ApiError(404, 'record_not_found')
     text=result(portal_service.portal_statement_csv,m.organization,party,q.from_,q.to)
     services.audit(m.organization,request.user,'party.portal_export','party',party.pk,after={'from':q.from_,'to':q.to,'kind':party.kind})
     resp=HttpResponse(text,content_type='text/csv; charset=utf-8')
@@ -56,7 +57,7 @@ def payments(request,org_id:int,party_id:int,limit:int=100,offset:int=0):
 @router.get('/orgs/{org_id}/parties/{party_id}/portal/deductions')
 def deductions(request,org_id:int,party_id:int,limit:int=100,offset:int=0):
     m,p=open_party(request,org_id,party_id,'deductions')
-    if p.kind!='owner':raise HttpError(404,'Deductions exist for owners only')
+    if p.kind!='owner':raise ApiError(404, 'deductions_exist_for_owners_only')
     return money_dict(portal_service.portal_deductions(m.organization,m,p,limit,offset))
 
 @router.get('/orgs/{org_id}/parties/{party_id}/portal/activity')
@@ -73,5 +74,5 @@ def documents(request,org_id:int,party_id:int):
 def notices(request,org_id:int,party_id:int,limit:int=100,offset:int=0):
     m,p=open_party(request,org_id,party_id,'notices')
     page=portal_service.portal_notices(m.organization,p,limit,offset)
-    page['items']=[{'id':n.pk,'event_type':n.event_type,'title':n.event_type.replace('_',' ').title(),'text':notice_text(n),'state':n.state,'created_at':n.created_at.isoformat()} for n in page['items']]
+    page['items']=[{'id':n.pk,'event_type':n.event_type,'title':notice_title(n.event_type),'text':notice_text(n),'state':n.state,'created_at':n.created_at.isoformat()} for n in page['items']]
     return page
