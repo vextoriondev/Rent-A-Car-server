@@ -61,6 +61,13 @@ def issue_period(request,org_id:int,agreement_id:int,month:date):
     p=result(services.issue_period,m.organization,agreement_id,month,request.user)
     return {'period_id':p.pk,'month':p.month.isoformat(),'obligations':[{'id':o.pk,'kind':o.kind,'party_id':o.party_id,'amount':str(o.amount)} for o in p.obligations.all()]}
 
+@router.post('/orgs/{org_id}/agreements/{agreement_id}/periods/catch-up')
+def issue_periods_through(request,org_id:int,agreement_id:int,through:date|None=None):
+    """Bill every month from the agreement's start up to `through` (default: today). Months already billed are kept."""
+    m=membership(request,org_id,'period.issue',agreement=agreement_id)
+    issued=result(services.issue_months_through,m.organization,agreement_id,through or date.today(),request.user)
+    return {'issued':[p.month.isoformat() for p in issued]}
+
 @router.get('/orgs/{org_id}/periods')
 def periods(request,org_id:int,month:date|None=None,from_:date|None=Query(None,alias='from'),to:date|None=None,branch_id:int|None=None,limit:int=100,offset:int=0):
     m=membership(request,org_id,'read')

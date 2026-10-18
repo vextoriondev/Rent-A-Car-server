@@ -1,3 +1,4 @@
+from datetime import timedelta
 from django.db import transaction
 from ..models import Agreement, Period, Obligation
 from .audit import audit
@@ -38,3 +39,15 @@ def issue_period(org,agreement_id,month,user=None):
     notice(org,f'period:{period.pk}:customer',agreement.customer,'rent_issued',{'period_id':period.pk})
     audit(org,user,'period.issue','period',period.pk,after={'agreement_id':agreement.pk,'month':month,'version':version.number})
     return period
+
+@transaction.atomic
+def issue_months_through(org,agreement_id,through,user=None):
+    """Issue every month from the agreement's first month up to the month of `through` (or its last month, whichever is earlier); months already issued are kept. All or nothing."""
+    agreement=Agreement.objects.get(pk=agreement_id,organization=org,active=True)
+    last=through.replace(day=1)
+    if agreement.end_date:last=min(last,agreement.end_date.replace(day=1))
+    month=agreement.start_date.replace(day=1);issued=[]
+    while month<=last:
+        if not Period.objects.filter(organization=org,agreement=agreement,month=month).exists():issued.append(issue_period(org,agreement_id,month,user))
+        month=(month+timedelta(days=32)).replace(day=1)
+    return issued

@@ -100,12 +100,14 @@ def dues_for(agreement,side,today=None,until=None,versions=None):
     zero=(lambda v:v.driver_paid_by!='operator' or v.driver_provider=='none') if side=='driver' else None
     segments=rent_calc.build_segments(rent_calc.versions_entries(versions,field,basis,None,zero),start,end)
     dates=due_dates(versions,start,end,side,horizon)
-    paid=(Allocation.objects.filter(obligation__period__agreement=agreement,obligation__kind=KIND[side]).aggregate(t=Sum('amount'))['t'] or ZERO) if getattr(agreement,'pk',None) else ZERO   # a preview has nothing paid
+    paid={}   # month -> what was paid against that month's own bill (a preview has nothing paid)
+    if getattr(agreement,'pk',None):
+        for m,t in Allocation.objects.filter(obligation__period__agreement=agreement,obligation__kind=KIND[side]).values_list('obligation__period__month').annotate(t=Sum('amount')):paid[m]=t
     out=[];prev=None
     for d in dates:
         frm=start if prev is None else prev+timedelta(days=1)
         amount=rent_calc.q(accrued_through(segments,start,end,d)-(accrued_through(segments,start,end,frm-timedelta(days=1)) if prev is not None else ZERO))
-        applied=min(amount,paid);paid-=applied
+        m=rent_calc.month_start(d);applied=min(amount,paid.get(m,ZERO));paid[m]=paid.get(m,ZERO)-applied   # a payment counts toward the month it was billed in, oldest due of that month first
         state='paid' if applied>=amount else 'overdue' if d<today else 'partly_paid' if applied>0 else 'due'
         out.append({'side':side,'due_date':d,'covers_from':frm,'covers_to':d,'amount':amount,'paid':rent_calc.q(applied),'state':state})
         prev=d

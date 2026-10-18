@@ -83,6 +83,12 @@ class PaidStateTests(DuesBase):
         self.assertEqual(d[1]['state'],'overdue');self.assertEqual(services.next_due(d)['due_date'],date(2026,10,31))        # the oldest unpaid due
         self.assertEqual(self.dues(a,today=date(2026,10,20))[1]['state'],'partly_paid')                                        # partly paid, not yet overdue
 
+    def test_a_payment_counts_toward_the_month_it_was_billed_in(self):
+        a=self.make();octo=services.issue_period(self.org,a.pk,date(2026,10,1))
+        self.pay(octo,'customer_payment',20000,'P1')                                                                           # only October is billed and paid
+        d=self.dues(a,today=date(2026,11,10))
+        self.assertEqual([x['paid'] for x in d],[D('0.00'),D('20000.00'),D('0.00')])                                           # September stays unpaid, not first in line
+
     def test_paying_one_month_leaves_the_rest_due(self):
         a=self.make();sep=services.issue_period(self.org,a.pk,date(2026,9,1))
         self.pay(sep,'customer_payment',30000,'P1')
@@ -92,6 +98,23 @@ class PaidStateTests(DuesBase):
         a=self.make();sep=services.issue_period(self.org,a.pk,date(2026,9,1))
         self.pay(sep,'salary_advance',2000,'ADV',side='driver_salary')
         d=self.dues(a,'driver',today=date(2026,9,15));self.assertEqual((d[0]['state'],d[0]['paid']),('partly_paid',D('2000.00')))
+
+class IssueMonthsTests(DuesBase):
+    def test_catch_up_bills_every_month_to_now_once(self):
+        a=self.make(start=date(2026,1,1),end=None)
+        issued=services.issue_months_through(self.org,a.pk,date(2026,4,18))
+        self.assertEqual([p.month for p in issued],[date(2026,1,1),date(2026,2,1),date(2026,3,1),date(2026,4,1)])
+        self.assertEqual(services.issue_months_through(self.org,a.pk,date(2026,5,2))[0].month,date(2026,5,1))                  # only the new month is added
+        self.assertEqual(services.issue_months_through(self.org,a.pk,date(2026,5,2)),[])                                       # nothing twice
+
+    def test_catch_up_stops_at_the_agreement_end(self):
+        a=self.make(start=date(2026,1,1),end=date(2026,2,28))
+        self.assertEqual(len(services.issue_months_through(self.org,a.pk,date(2026,10,1))),2)
+
+    def test_an_old_month_can_be_billed_on_its_own_and_part_paid(self):
+        a=self.make(start=date(2026,1,1),end=None)
+        jan=services.issue_period(self.org,a.pk,date(2026,1,1));self.pay(jan,'customer_payment',20000,'JAN-1')
+        d=self.dues(a,today=date(2026,3,5));self.assertEqual((d[0]['state'],d[0]['paid']),('overdue',D('20000.00')))
 
 class DuesApiTests(DuesBase):
     def setUp(self):
