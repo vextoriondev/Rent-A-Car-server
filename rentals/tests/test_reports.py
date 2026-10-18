@@ -157,7 +157,7 @@ class ExportTests(ReportBase):
         text=r.content.decode('utf-8');self.assertTrue(text.startswith('﻿'))
         rows=list(csv.reader(io.StringIO(text.lstrip('﻿'))))
         self.assertEqual(rows[0],['Report','What you owe owners']);self.assertEqual(rows[1][0],'Created on');self.assertTrue(rows[1][1])
-        self.assertEqual(rows[2],['Filters',f'month=2026-09-01; owner_id={self.owner.pk}']);self.assertEqual(rows[3],[])
+        self.assertEqual(rows[2],['Filters',f'Month: 2026-09-01; Owner: {self.owner.pk}']);self.assertEqual(rows[3],[])
         self.assertEqual(rows[4],['Agreement','Car','Owner','Month','Owner rent (৳)','Taken off (৳)','Paid (৳)','Money to give (৳)','Created on'])
         self.assertEqual(len(rows[5:]),1);self.assertEqual(rows[5][2],'Farhana Rahman');self.assertEqual(rows[5][4:8],['60000.00','8000.00','40000.00','12000.00']);self.assertTrue(rows[5][8])
 

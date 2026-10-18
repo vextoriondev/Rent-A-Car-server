@@ -77,7 +77,7 @@ class DailyAndCategoryTests(M13Base):
     def test_daily_export_has_bom_preamble_and_breakdown(self):
         self.expense('X1',900,date(2026,9,3))
         r=self.c.get(f'{self.base}/reports/daily-expenses/export?date=2026-09-03');self.assertEqual(r.status_code,200)
-        text=r.content.decode('utf-8');self.assertTrue(text.startswith('﻿'));self.assertIn('date=2026-09-03',text);self.assertIn('By category',text)
+        text=r.content.decode('utf-8');self.assertTrue(text.startswith('﻿'));self.assertIn('Date: 2026-09-03',text);self.assertIn('By category',text)
         self.assertTrue(AuditEvent.objects.filter(action='report.export',target_id='daily-expenses').exists())
 
     def test_category_by_vehicle_reconciles_to_cost_by_responsible(self):

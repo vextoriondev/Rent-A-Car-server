@@ -13,7 +13,7 @@ from .driver_agreements import driver_balance_split
 from .documents import can_access, list_documents
 from .helpers import ZERO, DomainError
 from .ranges import overlapping_periods, resolve_range
-from .reports import excel_safe
+from .reports import csv_stamp, excel_safe
 from .statements import bulk_ledger_statements, customer_bill_state, payable_bill_state
 
 FIELDS={
@@ -144,7 +144,7 @@ def portal_statement_csv(org,party,start=None,end=None):
     data=portal_statement(org,party,start,end)
     fields=FIELDS[party.kind]
     buf=io.StringIO(newline='');w=csv.writer(buf,lineterminator='\r\n',quoting=csv.QUOTE_ALL)
-    w.writerow([translate('csv_statement'),excel_safe(party.name)]);w.writerow([translate('csv_kind'),word('party',party.kind)]);w.writerow([translate('csv_generated_at'),datetime.now(timezone.utc).isoformat()])
+    w.writerow([translate('csv_statement'),excel_safe(party.name)]);w.writerow([translate('csv_kind'),word('party',party.kind)]);w.writerow([translate('csv_generated_at'),csv_stamp()])
     w.writerow([translate('csv_period'),translate('csv_period_range',{'from':data['from'] or translate('csv_start'),'to':data['to'] or translate('csv_now')})]);w.writerow([])
     w.writerow([translate('col_month'),translate('col_agreement'),translate('col_vehicle')]+[LABELS(f) for f in fields]+[translate('col_bill')])
     for r in data['rows']:w.writerow([r['month'],r['ref'],excel_safe(r['vehicle'])]+[str(r[f]) for f in fields]+[word('billstate',r['bill_state'])])

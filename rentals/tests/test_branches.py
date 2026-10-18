@@ -163,7 +163,7 @@ class ReportScopeTests(BranchBase):
         self.assertEqual([r[0] for r in self.get('acc_main','/reports/customer-aging').json()['rows']],['Meridian Textiles Ltd.']);self.assertEqual([r[0] for r in self.get('acc_syl','/reports/customer-aging').json()['rows']],['Syl Customer'])
         self.assertEqual(self.get('admin_all','/reports/customer-aging').json()['count'],2)
         csv_=self.get('view_main','/reports/customer-balances/export');self.assertEqual(csv_.status_code,200)
-        text=csv_.content.decode('utf-8');self.assertTrue(text.startswith('﻿'));self.assertIn(f'branch_id={self.main.pk}',text);self.assertNotIn('SYL-1',text)
+        text=csv_.content.decode('utf-8');self.assertTrue(text.startswith('﻿'));self.assertIn(f'Branch: {self.main.pk}',text);self.assertNotIn('SYL-1',text)
         rows=list(csv.reader(io.StringIO(text.lstrip('﻿'))));self.assertEqual(sum(1 for r in rows if r and r[0].startswith('AGR-')),1)
 
     def test_entries_report_hides_other_branch_payments_and_expenses(self):

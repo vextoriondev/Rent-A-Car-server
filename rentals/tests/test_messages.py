@@ -6,7 +6,7 @@ import re
 from datetime import date
 from decimal import Decimal as D
 from pathlib import Path
-from django.test import Client
+from django.test import Client, SimpleTestCase
 from .base import RentalsTestCase
 from .. import i18n, services
 from ..models import UserPreference
@@ -94,3 +94,14 @@ class LanguageTests(RentalsTestCase):
 
     def test_party_language_defaults_to_english(self):
         self.assertEqual(self.owner.language,'en')
+
+
+class CsvPreambleTests(SimpleTestCase):
+    def test_filter_names_follow_the_language_and_the_stamp_is_plain_digits(self):
+        from ..services.reports import csv_stamp, filter_label
+        self.assertEqual((filter_label('from'),filter_label('owner_id')),('From','Owner'))
+        tokens=i18n.set_language('bn')
+        try:self.assertEqual((filter_label('from'),filter_label('owner_id')),('শুরুর তারিখ','মালিক'))
+        finally:i18n.reset_language(tokens)
+        self.assertEqual(filter_label('unknown_filter'),'unknown_filter')
+        self.assertRegex(csv_stamp(),r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$')

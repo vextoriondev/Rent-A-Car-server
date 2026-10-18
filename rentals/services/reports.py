@@ -8,7 +8,7 @@ from decimal import Decimal
 from django.db.models import CharField, Count, Exists, OuterRef, Sum
 from django.db.models.functions import Cast
 from . import dues, ranged
-from ..i18n import translate, word
+from ..i18n import has_code, translate, word
 from ..models import AgreementVersion, Allocation, Document, ExpenseCategory, Expense, Obligation, Payment, Period
 from ..policies import period_in_branch
 from .helpers import ZERO, DomainError
@@ -256,13 +256,22 @@ def excel_safe(cell):
     """Excel runs a text cell that starts with = + @ (or - not followed by a digit) as a formula, so a typed reference such as =HYPERLINK(...) could execute when the file is opened. A leading apostrophe-free fix is a single quote prefix; numbers like -1500.00 are left alone."""
     return "'"+cell if isinstance(cell,str) and _FORMULA.match(cell) else cell
 
+def csv_stamp():
+    """When the file was made: a plain date and time (24-hour, UTC), the same digits in every language so Excel can read it."""
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
+
+def filter_label(key):
+    """The name of a report filter in the user's language; an unknown filter keeps its key."""
+    code='csv_filter_'+key
+    return translate(code) if has_code(code) else key
+
 def report_csv(org,rtype,filters=None,as_of=None):
     """CSV text: report name, generated_at and the applied filters first, then the table. Exports ignore pagination (all rows)."""
     data=run_report(org,rtype,filters,limit=None,as_of=as_of)
     buf=io.StringIO(newline='');w=csv.writer(buf,lineterminator='\r\n',quoting=csv.QUOTE_ALL)
-    now=datetime.now(timezone.utc).isoformat()
+    now=csv_stamp()
     w.writerow([translate('csv_report'),data['title']]);w.writerow([translate('csv_generated_at'),now])
-    w.writerow([translate('csv_filters'),'; '.join(f'{k}={v}' for k,v in sorted(data['filters'].items())) or translate('csv_none')]);w.writerow([])
+    w.writerow([translate('csv_filters'),'; '.join(f"{filter_label(k)}: {v}" for k,v in sorted(data['filters'].items())) or translate('csv_none')]);w.writerow([])
     w.writerow(data['columns']+([translate('csv_generated_at')] if rtype in PERIOD_REPORTS else []))
     for r in data['rows']:w.writerow([excel_safe(c) for c in r]+([now] if rtype in PERIOD_REPORTS else []))
     for name,part in data.get('breakdowns',{}).items():

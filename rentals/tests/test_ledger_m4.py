@@ -167,7 +167,7 @@ class InvoiceTests(LedgerBase):
         self.charge('customer','charge',5000);inv2=self.issue('inv-3');self.assertEqual((inv2.number,services.invoice_summary(inv2)['amount']),('INV-%d-00002'%date.today().year,D(5000)))
 
     def test_status_is_derived_from_allocations(self):
-        inv=self.issue(due_date=date(2026,10,15));today=date(2026,10,1)
+        inv=self.issue(issue_date=date(2026,10,1),due_date=date(2026,10,15));today=date(2026,10,1)
         self.assertEqual(services.invoice_summary(inv,today)['status'],'issued')
         self.pay('customer_payment','40000','I-P1');s=services.invoice_summary(inv,today);self.assertEqual((s['status'],s['paid'],s['outstanding']),('partially_paid',D(40000),D(60000)))
         self.assertEqual(services.invoice_summary(inv,date(2026,10,16))['status'],'overdue')

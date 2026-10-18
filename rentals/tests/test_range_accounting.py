@@ -160,7 +160,7 @@ class ReportRangeTests(RangeBase):
 
     def test_export_carries_the_range_and_the_opening_column(self):
         r=self.c.get(f'{self.base}/reports/customer-balances/export?from=2026-09-25&to=2026-09-30');self.assertEqual(r.status_code,200)
-        text=r.content.decode('utf-8-sig');self.assertIn('from=2026-09-25',text);self.assertIn('to=2026-09-30',text);self.assertIn('Balance at the start (৳)',text);self.assertIn('10000.00',text)
+        text=r.content.decode('utf-8-sig');self.assertIn('From: 2026-09-25',text);self.assertIn('To: 2026-09-30',text);self.assertIn('Balance at the start (৳)',text);self.assertIn('10000.00',text)
 
     def test_query_count_is_constant_in_periods(self):
         services.issue_period(self.org,self.agreement.pk,date(2026,10,1))
