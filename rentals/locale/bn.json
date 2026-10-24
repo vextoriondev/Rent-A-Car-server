@@ -248,6 +248,8 @@
  "notice_title_expense_posted": "খরচ রেকর্ড হয়েছে",
  "notice_title_payment_recorded": "পেমেন্ট রেকর্ড হয়েছে",
  "notice_title_rent_issued": "ভাড়ার বিল হয়েছে",
+ "admin_copy_email_is_not_a_valid_email": "অ্যাডমিনের ইমেইল ঠিকানাটি সঠিক নয়।",
+ "notice_admin_for": "{party} সম্পর্কে: {text}",
  "notice_title_settlement_closed": "মাস বন্ধ হয়েছে",
  "nxt_is_closed_too_reopen_it_or": "{nxt}-ও বন্ধ। এটি আবার খুলুন, অথবা এন্ট্রিটি পরের কোনো খোলা মাসে যোগ করুন।",
  "obligation_does_not_exist_in_this_organization": "এই বিষয়টি আপনার কোম্পানিতে নেই।",

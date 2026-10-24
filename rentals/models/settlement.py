@@ -9,6 +9,8 @@ class OrgSettings(models.Model):
     cutoff_day = models.PositiveSmallIntegerField(default=31,help_text='Informational cutoff day of month; 31 = calendar month-end')
     approval_role = models.CharField(max_length=16,default='admin',help_text='Role allowed to approve a settlement (admin can always approve)')
     negative_owner_blocks_close = models.BooleanField(default=False)
+    admin_copy_email = models.EmailField(blank=True,help_text='Every money notice is also sent here (M7)')
+    admin_copy_phone = models.CharField(max_length=32,blank=True,help_text='Every money notice is also sent here by SMS (M7)')
 
 class Settlement(models.Model):
     """The month-end workflow around one Period: draft -> pending_approval -> approved -> closed (-> reopened -> ...)."""
