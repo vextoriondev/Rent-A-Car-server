@@ -15,6 +15,7 @@ def person(user):
     return (user.get_full_name() or user.username) if user else ''
 
 
+NOTICE_STATUS={'queued':'Queued','sent':'Sent','delivered':'Delivered','failed':'Failed','skipped_no_contact':'Skipped'}
 NOTICE_EVENTS=('rent_issued','expense_posted','payment_recorded','settlement_closed')
 
 def notice_text(n):
@@ -68,5 +69,5 @@ def snapshot(request,org_id:int,month:date|None=None,from_:date|None=Query(None,
                 for row in alloc.allocations.all():
                     pay=row.payment
                     entries.append({'id':f'PAY-{pay.pk}-{row.pk}','agreementId':agreement_id,'type':{'customer_payment':'Customer payment','owner_payout':'Owner payout','driver_payout':'Driver payout','salary_advance':'Salary advance'}[pay.kind],'amount':float(row.amount),'date':pay.event_date.isoformat(),'category':'Rent' if pay.kind=='customer_payment' else 'Payout','paidBy':pay.party.name if pay.kind=='customer_payment' else 'Operator','responsible':'Operator','reference':pay.reference,'description':pay.note or word('entrytype',pay.kind),'recordedBy':person(pay.recorded_by),'status':'Posted'})
-    notices=[{'id':f'NT-{n.pk}','title':notice_title(n.event_type),'detail':notice_text(n),'date':n.created_at.date().isoformat(),'status':n.state.title(),'read':False,'recipient':n.recipient.name} for n in policies.branch_scope(m,NotificationOutbox.objects.filter(organization_id=org_id),branch_id).select_related('recipient').order_by('-id')[:200]]
+    notices=[{'id':f'NT-{n.pk}','title':notice_title(n.event_type),'detail':notice_text(n),'date':n.created_at.date().isoformat(),'status':NOTICE_STATUS.get(n.state,n.state.title()),'read':False,'recipient':n.recipient.name,'error':n.last_error,'deliveries':[{'channel':d.channel,'isAdminCopy':d.is_admin_copy,'to':d.to_address,'state':d.state,'error':d.last_error} for d in n.deliveries.all()]} for n in policies.branch_scope(m,NotificationOutbox.objects.filter(organization_id=org_id),branch_id).select_related('recipient').prefetch_related('deliveries').order_by('-id')[:200]]
     return {'agreements':agreements,'entries':entries,'notices':notices,'closed':closed,'backend':{'orgId':org_id,'periodIds':period_ids,'obligationIds':obligation_ids,'expenseIds':expense_ids,**({'periods':all_periods} if ranged else {})}}
