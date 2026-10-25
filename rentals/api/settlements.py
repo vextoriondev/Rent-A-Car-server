@@ -11,7 +11,7 @@ router = Router()
 def get_settings(request,org_id:int):
     m=membership(request,org_id,'read_financial')
     s=services.get_settings(m.organization)
-    return {'cutoff_day':s.cutoff_day,'approval_role':s.approval_role,'negative_owner_blocks_close':s.negative_owner_blocks_close}
+    return {'cutoff_day':s.cutoff_day,'approval_role':s.approval_role,'negative_owner_blocks_close':s.negative_owner_blocks_close,'admin_copy_email':s.admin_copy_email,'admin_copy_phone':s.admin_copy_phone}
 
 @router.get('/orgs/{org_id}/workspace')
 def workspace(request,org_id:int):
@@ -19,13 +19,13 @@ def workspace(request,org_id:int):
     m=membership(request,org_id,'read')
     from ..services.expenses import DEFAULT_THRESHOLD
     s=services.get_settings(m.organization)
-    return {'name':m.organization.name,'currency':'BDT','default_expense_threshold':str(DEFAULT_THRESHOLD),'month_end':{'cutoff_day':s.cutoff_day,'approval_role':s.approval_role},'message_delivery':'not_connected'}
+    return {'name':m.organization.name,'currency':'BDT','default_expense_threshold':str(DEFAULT_THRESHOLD),'month_end':{'cutoff_day':s.cutoff_day,'approval_role':s.approval_role},'message_delivery':services.delivery_status(),'message_channels':services.delivery_channels()}
 
 @router.put('/orgs/{org_id}/settlement-settings')
 def put_settings(request,org_id:int,payload:SettingsIn):
     m=membership(request,org_id,'settings.write')
     s=result(services.update_settings,m.organization,request.user,**payload.dict())
-    return {'cutoff_day':s.cutoff_day,'approval_role':s.approval_role,'negative_owner_blocks_close':s.negative_owner_blocks_close}
+    return {'cutoff_day':s.cutoff_day,'approval_role':s.approval_role,'negative_owner_blocks_close':s.negative_owner_blocks_close,'admin_copy_email':s.admin_copy_email,'admin_copy_phone':s.admin_copy_phone}
 
 @router.get('/orgs/{org_id}/periods/{period_id}/settlement-preview')
 def preview(request,org_id:int,period_id:int):

@@ -15,6 +15,7 @@ from .ranged import agreement_range_statement, ranged_sections
 from .dues import dues_for, next_due, normalize_schedule, preview_terms
 from .terms import ensure_baseline, version_for, owner_on, assignment_on, create_agreement, activate_agreement, revise_agreement, assign_driver, transfer_vehicle_ownership, check_overlaps
 from .audit import audit, snap
+from .notify import delivery_status, channels as delivery_channels, requeue as requeue_notice
 from .documents import upload_document, delete_document, list_documents, issue_url, resolve_token, read_bytes, can_access, in_branch
 from .maintenance import create_case, update_case, approve_case
 from .parties import party_ids, set_party_ids, mask_id, default_branch, update_party, set_consent, add_contact, delete_contact, grant_party_access, revoke_party_access, create_branch, update_member
@@ -25,5 +26,5 @@ __all__ = ['ensure_accounts','period_parties','ZERO','DomainError','bd','total',
     'update_agreement_dates','agreement_range_statement','ranged_sections','dues_for','next_due','normalize_schedule','preview_terms','ensure_baseline','version_for','owner_on','assignment_on','create_agreement','activate_agreement','revise_agreement','assign_driver','transfer_vehicle_ownership','check_overlaps',
     'update_draft','submit_expense','discard_draft','ensure_categories','create_category','update_category','resolve_range','overlapping_periods','entry_dates','resolve_rule','set_expense_rule','delete_expense_rule',
     'ledger_statement','obligation_statement','diff_statements','post_charge','carry_forward','create_driver_agreement','update_driver_agreement','revise_driver_agreement','issue_driver_period','driver_balance_split','check_driver_overlaps','charge_suggestion','preview_invoice','issue_invoice','void_invoice','invoice_summary',
-    'audit','snap','upload_document','delete_document','list_documents','issue_url','resolve_token','read_bytes','can_access','in_branch','create_case','update_case','approve_case',
+    'audit','snap','delivery_status','delivery_channels','requeue_notice','upload_document','delete_document','list_documents','issue_url','resolve_token','read_bytes','can_access','in_branch','create_case','update_case','approve_case',
     'party_ids','set_party_ids','mask_id','default_branch','update_party','set_consent','add_contact','delete_contact','grant_party_access','revoke_party_access','create_branch','update_member']

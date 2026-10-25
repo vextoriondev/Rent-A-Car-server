@@ -248,6 +248,8 @@
  "notice_title_expense_posted": "Expense recorded",
  "notice_title_payment_recorded": "Payment recorded",
  "notice_title_rent_issued": "Rent billed",
+ "admin_copy_email_is_not_a_valid_email": "The admin email address is not valid.",
+ "notice_admin_for": "About {party}: {text}",
  "notice_title_settlement_closed": "Month closed",
  "nxt_is_closed_too_reopen_it_or": "{nxt} is closed too. Open it again, or add the entry to a later month that is open.",
  "obligation_does_not_exist_in_this_organization": "That item does not exist in your company.",

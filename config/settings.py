@@ -57,3 +57,13 @@ if 'test' in sys.argv: PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5Passw
 # Private document storage: never served directly; only through signed, user-bound, short-lived URLs (rentals.services.documents).
 PRIVATE_MEDIA_ROOT = Path(os.environ.get('PRIVATE_MEDIA_ROOT') or BASE_DIR / 'private_media')   # on Railway: a mounted volume, so uploads survive a redeploy
 DOCUMENT_URL_MAX_AGE = int(os.environ.get('DOCUMENT_URL_MAX_AGE','300'))
+
+# Email via Resend (rentals/services/email_resend.py). No key = console adapter: nothing is sent and nothing is reported delivered.
+RESEND_API_KEY = os.environ.get('RESEND_API_KEY','')
+EMAIL_FROM_ADDRESS = os.environ.get('EMAIL_FROM_ADDRESS','')   # a verified domain in Resend; for testing only, onboarding@resend.dev (delivers just to your own Resend account email)
+EMAIL_FROM_NAME = os.environ.get('EMAIL_FROM_NAME','RentFlow')
+EMAIL_TIMEOUT = int(os.environ.get('EMAIL_TIMEOUT','10'))
+
+# How queued SMS/email notices are sent (rentals/services/notify.py): thread (default, no broker needed) | celery | inline | off. Tests send inline.
+NOTICE_DELIVERY = os.environ.get('NOTICE_DELIVERY') or ('inline' if 'test' in sys.argv else 'thread')
+if 'test' in sys.argv: RESEND_API_KEY = ''   # a test run must never send a real email, whatever .env.local holds

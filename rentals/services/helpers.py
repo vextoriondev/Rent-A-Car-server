@@ -79,7 +79,11 @@ def period_parties(period):
     return {'customer':by_kind.get('customer_rent') or (period.agreement.customer if period.agreement_id else None),'owner':by_kind.get('owner_rent'),'driver':by_kind.get('driver_salary')}  # a side is None when the agreement has none (vehicle only, or a driver agreement)
 
 def notice(org,event_key,party,event_type,payload):
-    NotificationOutbox.objects.get_or_create(organization=org,event_key=event_key,recipient=party,defaults={'event_type':event_type,'payload':payload})
+    if party is None:return
+    outbox,created=NotificationOutbox.objects.get_or_create(organization=org,event_key=event_key,recipient=party,defaults={'event_type':event_type,'payload':payload})
+    if created:
+        from . import notify   # deliveries are planned in this transaction and sent only after it commits
+        notify.dispatch(notify.plan(outbox))
 
 def validate_agreement(agreement):
     org=agreement.organization_id

@@ -4,6 +4,8 @@ Period.closed_at stays the single gate every posting service already checks; the
 frozen statement lines around it. Locks are always taken in the order Period -> Settlement."""
 from datetime import timedelta
 from decimal import Decimal
+from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.db import transaction
 from django.utils import timezone
 from ..models import Allocation, Charge, Expense, InvoiceLine, Invoice, Obligation, OrgSettings, OwnerOffset, Period, Settlement, SettlementLine
@@ -28,9 +30,9 @@ def show_label(stored):
 def get_settings(org):
     return OrgSettings.objects.get_or_create(organization=org)[0]
 
-def update_settings(org,user,*,cutoff_day=None,approval_role=None,negative_owner_blocks_close=None):
+def update_settings(org,user,*,cutoff_day=None,approval_role=None,negative_owner_blocks_close=None,admin_copy_email=None,admin_copy_phone=None):
     s=get_settings(org)
-    before={'cutoff_day':s.cutoff_day,'approval_role':s.approval_role,'negative_owner_blocks_close':s.negative_owner_blocks_close}
+    before={'cutoff_day':s.cutoff_day,'approval_role':s.approval_role,'negative_owner_blocks_close':s.negative_owner_blocks_close,'admin_copy_email':s.admin_copy_email,'admin_copy_phone':s.admin_copy_phone}
     if cutoff_day is not None:
         if not 1<=cutoff_day<=31:raise DomainError('cutoff_day_must_be_between_1_and')
         s.cutoff_day=cutoff_day
@@ -38,8 +40,13 @@ def update_settings(org,user,*,cutoff_day=None,approval_role=None,negative_owner
         if approval_role not in('admin','accountant'):raise DomainError('approval_role_must_be_admin_or_accountant')
         s.approval_role=approval_role
     if negative_owner_blocks_close is not None:s.negative_owner_blocks_close=negative_owner_blocks_close
+    if admin_copy_email is not None:
+        try:validate_email(admin_copy_email.strip()) if admin_copy_email.strip() else None
+        except ValidationError:raise DomainError('admin_copy_email_is_not_a_valid_email')
+        s.admin_copy_email=admin_copy_email.strip()
+    if admin_copy_phone is not None:s.admin_copy_phone=admin_copy_phone.strip()[:32]
     s.save()
-    audit(org,user,'settings.update','org_settings',s.pk,before=before,after={'cutoff_day':s.cutoff_day,'approval_role':s.approval_role,'negative_owner_blocks_close':s.negative_owner_blocks_close})
+    audit(org,user,'settings.update','org_settings',s.pk,before=before,after={'cutoff_day':s.cutoff_day,'approval_role':s.approval_role,'negative_owner_blocks_close':s.negative_owner_blocks_close,'admin_copy_email':s.admin_copy_email,'admin_copy_phone':s.admin_copy_phone})
     return s
 
 def exceptions_for(period):

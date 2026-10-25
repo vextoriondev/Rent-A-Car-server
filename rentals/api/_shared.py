@@ -40,7 +40,7 @@ class PaymentIn(Schema):
 class ReasonIn(Schema): reason:str
 class CaseIn(Schema): vehicle_id:int; issue:str; vendor:str=''; quote:Decimal|None=None; downtime_from:date|None=None; downtime_to:date|None=None
 class CasePatch(Schema): issue:str|None=None; vendor:str|None=None; quote:Decimal|None=None; downtime_from:date|None=None; downtime_to:date|None=None; status:Literal['in_progress','done','cancelled']|None=None
-class SettingsIn(Schema): cutoff_day:int|None=None; approval_role:Literal['admin','accountant']|None=None; negative_owner_blocks_close:bool|None=None
+class SettingsIn(Schema): cutoff_day:int|None=None; approval_role:Literal['admin','accountant']|None=None; negative_owner_blocks_close:bool|None=None; admin_copy_email:str|None=None; admin_copy_phone:str|None=None
 class ChargeIn(Schema):
     period_id:int; side:Literal['customer','owner','driver']; kind:Literal['charge','credit','adjustment','reimbursement','opening_balance','overtime','absence_deduction','fine']
     amount:Decimal|None=None; quantity:Decimal|None=None; unit_rate:Decimal|None=None; direction:Literal['increase','decrease']|None=None; description:str=''; reference:str=''
