@@ -8,7 +8,7 @@ class NotificationOutbox(models.Model):
     recipient = models.ForeignKey(Party,on_delete=models.PROTECT)
     event_type = models.CharField(max_length=40)
     payload = models.JSONField(default=dict)
-    state = models.CharField(max_length=12,default='queued')
+    state = models.CharField(max_length=20,default='queued')
     attempts = models.PositiveIntegerField(default=0)
     last_error = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
