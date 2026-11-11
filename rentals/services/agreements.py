@@ -12,14 +12,14 @@ def issue_period(org,agreement_id,month,user=None):
     agreement=Agreement.objects.select_for_update(of=('self',)).select_related('vehicle__owner','customer','driver').get(pk=agreement_id,organization=org,active=True)
     if month.day!=1:raise DomainError('month_must_be_its_first_day')
     if month<agreement.start_date.replace(day=1) or (agreement.end_date and month>agreement.end_date.replace(day=1)):raise DomainError('agreement_is_not_effective_this_month')
-    validate_agreement(agreement)
-    existing=Period.objects.filter(organization=org,agreement=agreement,month=month).first()
-    if existing:return existing
     ensure_baseline(agreement)
     version=version_for(agreement,month)
     owner=owner_on(agreement.vehicle,month)
     assignment=assignment_on(agreement,month) if version.driver_provider!='none' else None
     if version.driver_provider!='none' and not assignment:raise DomainError('assign_a_driver_before_issuing_this_month')
+    validate_agreement(agreement)
+    existing=Period.objects.filter(organization=org,agreement=agreement,month=month).first()
+    if existing:return existing
     live=list(agreement.versions.exclude(status='draft'))
     def side(name):
         field,basis=next((f,b) for n,f,b in rent_calc.SIDES if n==name)

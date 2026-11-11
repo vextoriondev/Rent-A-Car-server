@@ -37,7 +37,6 @@ def csrf_cookie(request):
 
 @router.post('/auth/login',auth=None)
 def login_view(request,payload:LoginIn):
-    require_csrf(request)
     user=authenticate(request,username=payload.username.strip(),password=payload.password)
     if not user:raise ApiError(401, 'incorrect_username_or_password')
     auth_login(request,user)

@@ -13,7 +13,9 @@ from .settlement import OrgSettings, Settlement, SettlementLine
 from .notifications import NotificationOutbox, NotificationDelivery
 from .idempotency import IdempotencyRecord
 from .preferences import UserPreference
+from .tasin import VehicleDetail, PartyDetail, Duty, Garage, MaintenanceRecord, VehiclePaper, FinancialAccount, AccountTransaction, SystemAlert, CompanyProfile
 
 __all__ = ['uid','Organization','Branch','Membership','Party','Contact','PartyUser','Vehicle','Agreement','DriverAgreement','DriverAgreementVersion','VehicleOwnership','DriverAssignment','AgreementVersion','Period','Obligation',
     'Expense','OwnerOffset','ExpenseCategory','ExpenseRule','Approval','Payment','Allocation','OrgSettings','Settlement','SettlementLine','MaintenanceCase','Document','AuditEvent','Account','JournalEntry','JournalLine','Charge','Invoice','InvoiceLine','InvoiceSequence',
-    'NotificationOutbox','NotificationDelivery','IdempotencyRecord','UserPreference']
+    'NotificationOutbox','NotificationDelivery','IdempotencyRecord','UserPreference',
+    'VehicleDetail','PartyDetail','Duty','Garage','MaintenanceRecord','VehiclePaper','FinancialAccount','AccountTransaction','SystemAlert','CompanyProfile']
