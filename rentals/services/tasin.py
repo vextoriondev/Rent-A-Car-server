@@ -78,6 +78,37 @@ def get_dashboard_kpis(org: Organization, target_date=None, period='Monthly'):
     all_income = AccountTransaction.objects.filter(organization=org, transaction_type='Income').aggregate(s=Sum('amount'))['s'] or D(0)
     all_expense = AccountTransaction.objects.filter(organization=org, transaction_type='Expense').aggregate(s=Sum('amount'))['s'] or D(0)
 
+    # Actual DB Collections & Owner Payments (replaces hardcoded frontend multipliers)
+    real_collections = AccountTransaction.objects.filter(
+        organization=org, transaction_type='Income', category__icontains='Collection'
+    ).aggregate(s=Sum('amount'))['s']
+    if not real_collections:
+        real_collections = sum((c.detail.total_collected_client) for c in clients if getattr(c, 'detail', None))
+    total_collection = float(real_collections or all_income)
+
+    real_owner_payments = sum((o.detail.total_paid_owner) for o in owners if getattr(o, 'detail', None))
+    if not real_owner_payments:
+        real_owner_payments = AccountTransaction.objects.filter(
+            organization=org, transaction_type='Expense', category='Owner Payment'
+        ).aggregate(s=Sum('amount'))['s'] or D(0)
+    total_owner_payment = float(real_owner_payments)
+
+    # Previous Month Comparison calculation
+    cur_m = target_date.month
+    cur_y = target_date.year
+    prev_m = 12 if cur_m == 1 else cur_m - 1
+    prev_y = cur_y - 1 if cur_m == 1 else cur_y
+    cur_month_inc = AccountTransaction.objects.filter(organization=org, transaction_type='Income', date__year=cur_y, date__month=cur_m).aggregate(s=Sum('amount'))['s'] or D(0)
+    prev_month_inc = AccountTransaction.objects.filter(organization=org, transaction_type='Income', date__year=prev_y, date__month=prev_m).aggregate(s=Sum('amount'))['s'] or D(0)
+    cur_month_exp = AccountTransaction.objects.filter(organization=org, transaction_type='Expense', date__year=cur_y, date__month=cur_m).aggregate(s=Sum('amount'))['s'] or D(0)
+    prev_month_exp = AccountTransaction.objects.filter(organization=org, transaction_type='Expense', date__year=prev_y, date__month=prev_m).aggregate(s=Sum('amount'))['s'] or D(0)
+    
+    rev_diff = float(cur_month_inc - prev_month_inc)
+    rev_pct = round(((float(cur_month_inc - prev_month_inc) / float(prev_month_inc)) * 100), 1) if prev_month_inc > 0 else (100.0 if cur_month_inc > 0 else 0.0)
+
+    # Ensure dynamic automated alerts are in database
+    generate_system_alerts(org, target_date)
+
     # Alerts count
     unread_alerts = SystemAlert.objects.filter(organization=org, is_read=False).count()
 
@@ -175,9 +206,19 @@ def get_dashboard_kpis(org: Organization, target_date=None, period='Monthly'):
             'ownerPayable': float(total_owner_payable),
             'driverPayable': float(total_driver_payable),
             'garagePayable': float(total_garage_payable),
+            'totalCollection': total_collection,
+            'totalOwnerPayment': total_owner_payment,
             'cashBalance': float(cash_balance),
             'bankBalance': float(bank_balance),
             'totalBalance': float(cash_balance + bank_balance),
+            'comparison': {
+                'revenueDiff': rev_diff,
+                'revenuePct': rev_pct,
+                'curMonthRevenue': float(cur_month_inc),
+                'prevMonthRevenue': float(prev_month_inc),
+                'curMonthExpense': float(cur_month_exp),
+                'prevMonthExpense': float(prev_month_exp),
+            }
         },
         'today': {
             'totalDuties': today_duties.count(),
@@ -193,3 +234,73 @@ def get_dashboard_kpis(org: Organization, target_date=None, period='Monthly'):
         'monthlyChart': monthly_chart,
         'recentTransactions': recent_list
     }
+
+def generate_system_alerts(org: Organization, target_date=None):
+    """Automated engine scanning document expiries, overdue invoices, and maintenance (Module 14)."""
+    if not target_date:
+        target_date = date.today()
+
+    # 1. Vehicle papers expiring in next 30 days or already expired
+    papers = VehiclePaper.objects.filter(organization=org, expiry_date__isnull=False)
+    for p in papers:
+        days_left = (p.expiry_date - target_date).days
+        if days_left <= 30:
+            sev = 'danger' if days_left < 0 else ('warning' if days_left <= 7 else 'info')
+            t_str = 'Expired' if days_left < 0 else f'Expiring in {days_left}d'
+            title = f"{p.get_paper_type_display()} {t_str} – {p.vehicle.reg_no}"
+            if not SystemAlert.objects.filter(organization=org, title=title).exists():
+                count = SystemAlert.objects.filter(organization=org).count() + 1
+                SystemAlert.objects.create(
+                    organization=org,
+                    alert_id=f'ALT-{count:03d}',
+                    alert_type='document',
+                    severity=sev,
+                    title=title,
+                    detail=f"Certificate #{p.paper_number} expired on {p.expiry_date}" if days_left < 0 else f"Certificate #{p.paper_number} expires on {p.expiry_date}",
+                    date=target_date,
+                    due_date=p.expiry_date,
+                    related_id=p.vehicle.reg_no
+                )
+
+    # 2. Driver License expiry
+    drivers = Party.objects.filter(organization=org, kind=Party.Kind.DRIVER).select_related('detail')
+    for d in drivers:
+        det = getattr(d, 'detail', None)
+        if det and det.license_expiry:
+            days_left = (det.license_expiry - target_date).days
+            if days_left <= 30:
+                sev = 'danger' if days_left < 0 else 'warning'
+                title = f"Driver License Expiring Soon – {d.name}"
+                if not SystemAlert.objects.filter(organization=org, title=title).exists():
+                    count = SystemAlert.objects.filter(organization=org).count() + 1
+                    SystemAlert.objects.create(
+                        organization=org,
+                        alert_id=f'ALT-{count:03d}',
+                        alert_type='document',
+                        severity=sev,
+                        title=title,
+                        detail=f"Driver {d.name} license expires on {det.license_expiry}",
+                        date=target_date,
+                        due_date=det.license_expiry,
+                        related_id=f'DRV-{d.pk:03d}'
+                    )
+
+    # 3. Client Overdue receivables
+    clients = Party.objects.filter(organization=org, kind=Party.Kind.CUSTOMER).select_related('detail')
+    for c in clients:
+        det = getattr(c, 'detail', None)
+        if det and (det.total_receivable_client - det.total_collected_client) > 0:
+            due_amt = det.total_receivable_client - det.total_collected_client
+            title = f"{c.name} – Outstanding Receivable Due"
+            if not SystemAlert.objects.filter(organization=org, title=title).exists():
+                count = SystemAlert.objects.filter(organization=org).count() + 1
+                SystemAlert.objects.create(
+                    organization=org,
+                    alert_id=f'ALT-{count:03d}',
+                    alert_type='payment',
+                    severity='warning' if due_amt < 50000 else 'danger',
+                    title=title,
+                    detail=f"Receivable balance of ৳{due_amt:,.0f} pending collection",
+                    date=target_date,
+                    related_id=f'CLT-{c.pk:03d}'
+                )

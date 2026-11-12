@@ -400,6 +400,16 @@ def pay_owner(request, org_id: int, owner_id: int, payload: PaymentActionIn):
     )
     return {'success': True, 'owner': p.name, 'amountPaid': float(payload.amount), 'remainingDue': float(det.total_payable_owner - det.total_paid_owner)}
 
+@router.delete('/orgs/{org_id}/tasin-owners/{owner_id}', auth=None)
+def delete_owner(request, org_id: int, owner_id: int):
+    org = _get_org(request, org_id)
+    p = Party.objects.filter(pk=owner_id, organization=org, kind=Party.Kind.OWNER).first()
+    if not p: raise ApiError(404, 'Owner not found')
+    det, _ = PartyDetail.objects.get_or_create(party=p)
+    det.status = 'Inactive'
+    det.save()
+    return {'id': str(p.pk), 'status': 'Inactive', 'success': True}
+
 # ─── MODULE 03: VEHICLE MANAGEMENT ───────────────────────────────────────────
 
 @router.get('/orgs/{org_id}/tasin-vehicles', auth=None)
@@ -431,6 +441,8 @@ def list_vehicles(request, org_id: int):
             'driverId': str(det.assigned_driver_id) if det and det.assigned_driver_id else '',
             'driver': driver_name,
             'monthlyRent': float(det.monthly_rent if det else 50000),
+            'mobilCount': det.mobil_count if det else 0,
+            'lastMobilDate': det.last_mobil_date.isoformat() if det and det.last_mobil_date else '',
             'agreementStart': det.agreement_start.isoformat() if det and det.agreement_start else '',
             'agreementEnd': det.agreement_end.isoformat() if det and det.agreement_end else ''
         })
@@ -495,6 +507,16 @@ def update_vehicle(request, org_id: int, vehicle_id: int, payload: VehicleInCust
         det.assigned_driver_id = payload.driver_id
     det.save()
     return {'id': str(v.pk), 'success': True}
+
+@router.delete('/orgs/{org_id}/tasin-vehicles/{vehicle_id}', auth=None)
+def delete_vehicle(request, org_id: int, vehicle_id: int):
+    org = _get_org(request, org_id)
+    v = Vehicle.objects.filter(pk=vehicle_id, organization=org).first()
+    if not v: raise ApiError(404, 'Vehicle not found')
+    det, _ = VehicleDetail.objects.get_or_create(vehicle=v)
+    det.status = 'Inactive'
+    det.save()
+    return {'id': str(v.pk), 'status': 'Inactive', 'success': True}
 
 @router.get('/orgs/{org_id}/tasin-vehicles/{vehicle_id}/papers', auth=None)
 def get_vehicle_papers(request, org_id: int, vehicle_id: int):
@@ -644,6 +666,16 @@ def pay_driver(request, org_id: int, driver_id: int, payload: PaymentActionIn):
         description=f'Salary / Payout to driver {d.name}: {payload.note}'
     )
     return {'success': True, 'driver': d.name, 'amountPaid': float(payload.amount), 'remainingDue': float(det.monthly_salary - det.total_paid_driver + det.advance)}
+
+@router.delete('/orgs/{org_id}/tasin-drivers/{driver_id}', auth=None)
+def delete_driver(request, org_id: int, driver_id: int):
+    org = _get_org(request, org_id)
+    d = Party.objects.filter(pk=driver_id, organization=org, kind=Party.Kind.DRIVER).first()
+    if not d: raise ApiError(404, 'Driver not found')
+    det, _ = PartyDetail.objects.get_or_create(party=d)
+    det.status = 'Inactive'
+    det.save()
+    return {'id': str(d.pk), 'status': 'Inactive', 'success': True}
 
 # ─── MODULE 05: CLIENTS & COMPANIES MANAGEMENT ───────────────────────────────
 
@@ -797,6 +829,27 @@ def create_duty(request, org_id: int, payload: DutyIn):
     vehicle = Vehicle.objects.filter(pk=int(payload.vehicle_id), organization=org).first() if payload.vehicle_id and payload.vehicle_id.isdigit() else None
     driver = Party.objects.filter(pk=int(payload.driver_id), organization=org).first() if payload.driver_id and payload.driver_id.isdigit() else None
 
+    # Overlap and conflict validation
+    if payload.status in ('Scheduled', 'Running'):
+        if vehicle:
+            conflict_v = Duty.objects.filter(
+                organization=org,
+                vehicle=vehicle,
+                date=payload.date,
+                status__in=['Scheduled', 'Running']
+            ).first()
+            if conflict_v:
+                raise ApiError(409, f"Vehicle {payload.vehicle_reg} is already booked for Duty {conflict_v.duty_id} on {payload.date}")
+        if driver:
+            conflict_d = Duty.objects.filter(
+                organization=org,
+                driver=driver,
+                date=payload.date,
+                status__in=['Scheduled', 'Running']
+            ).first()
+            if conflict_d:
+                raise ApiError(409, f"Driver {payload.driver_name} is already assigned to Duty {conflict_d.duty_id} on {payload.date}")
+
     d = Duty.objects.create(
         organization=org,
         duty_id=duty_code,
@@ -868,6 +921,10 @@ def list_daily_expenses(request, org_id: int, date_val: str | None = None, categ
 @router.post('/orgs/{org_id}/tasin-expenses', auth=None)
 def record_daily_expense(request, org_id: int, payload: ExpenseInCustom):
     org = _get_org(request, org_id)
+    if payload.reference and payload.reference.strip():
+        dup = AccountTransaction.objects.filter(organization=org, reference=payload.reference.strip()).first()
+        if dup:
+            raise ApiError(409, f"Transaction with reference '{payload.reference}' already exists ({dup.transaction_id})")
     count = AccountTransaction.objects.filter(organization=org, transaction_type='Expense').count() + 1
     t = AccountTransaction.objects.create(
         organization=org,
@@ -920,6 +977,38 @@ def create_garage(request, org_id: int, payload: GarageIn):
     )
     return {'id': str(g.pk), 'garageId': g.garage_id, 'name': g.name, 'success': True}
 
+@router.post('/orgs/{org_id}/tasin-garages/{garage_id}/payments', auth=None)
+def record_garage_payment(request, org_id: int, garage_id: int, payload: PaymentActionIn):
+    org = _get_org(request, org_id)
+    g = Garage.objects.filter(pk=garage_id, organization=org).first()
+    if not g: raise ApiError(404, 'Garage not found')
+    with transaction.atomic():
+        g.total_paid += payload.amount
+        g.save()
+        count = AccountTransaction.objects.filter(organization=org).count() + 1
+        AccountTransaction.objects.create(
+            organization=org,
+            transaction_id=f'EXP-G-{count:03d}',
+            date=payload.date or date.today(),
+            transaction_type='Expense',
+            category='Garage Bill',
+            related_person=g.name,
+            amount=payload.amount,
+            payment_method=payload.payment_method,
+            reference=payload.reference,
+            description=f'Payment to garage {g.name}: {payload.note}'
+        )
+    return {'success': True, 'garage': g.name, 'amountPaid': float(payload.amount), 'remainingDue': float(g.total_bill - g.total_paid)}
+
+@router.delete('/orgs/{org_id}/tasin-garages/{garage_id}', auth=None)
+def delete_garage(request, org_id: int, garage_id: int):
+    org = _get_org(request, org_id)
+    g = Garage.objects.filter(pk=garage_id, organization=org).first()
+    if not g: raise ApiError(404, 'Garage not found')
+    g.status = 'Inactive'
+    g.save()
+    return {'id': str(g.pk), 'status': 'Inactive', 'success': True}
+
 @router.get('/orgs/{org_id}/tasin-maintenance', auth=None)
 def list_maintenance(request, org_id: int):
     org = _get_org(request, org_id)
@@ -967,13 +1056,79 @@ def create_maintenance(request, org_id: int, payload: MaintenanceIn):
     if g:
         g.total_bill += total
         g.save()
-    # Update vehicle status to 'In Garage' if in progress
+    # Update vehicle status and mobil count if applicable
     v = Vehicle.objects.filter(organization=org, registration=payload.vehicle_reg.strip()).first()
-    if v and payload.status in ('Pending', 'In Progress'):
+    if v:
         det, _ = VehicleDetail.objects.get_or_create(vehicle=v)
-        det.status = 'In Garage'
+        if payload.status in ('Pending', 'In Progress'):
+            det.status = 'In Garage'
+        elif payload.status in ('Completed', 'Delivered'):
+            det.status = 'Available'
+        if payload.service_type == 'Oil Change':
+            det.mobil_count += 1
+            det.last_mobil_date = payload.date
         det.save()
     return {'id': str(m.pk), 'maintenanceId': m.maintenance_id, 'totalCost': float(m.total_cost), 'success': True}
+
+@router.put('/orgs/{org_id}/tasin-maintenance/{mnt_id}', auth=None)
+def update_maintenance(request, org_id: int, mnt_id: int, payload: MaintenanceIn):
+    org = _get_org(request, org_id)
+    m = MaintenanceRecord.objects.filter(pk=mnt_id, organization=org).first()
+    if not m: raise ApiError(404, 'Maintenance record not found')
+    old_total = m.total_cost
+    new_total = payload.labour_cost + payload.parts_cost
+
+    m.vehicle_reg = payload.vehicle_reg.strip()
+    m.garage_name = payload.garage_name.strip()
+    m.date = payload.date
+    m.problem_description = payload.problem_description.strip()
+    m.service_type = payload.service_type
+    m.parts_details = payload.parts_details.strip()
+    m.labour_cost = payload.labour_cost
+    m.parts_cost = payload.parts_cost
+    m.total_cost = new_total
+    m.expected_delivery = payload.expected_delivery
+    m.actual_delivery = payload.actual_delivery
+    m.status = payload.status
+    m.save()
+
+    # Adjust garage bill
+    g = Garage.objects.filter(organization=org, name=payload.garage_name.strip()).first()
+    if g:
+        g.total_bill += (new_total - old_total)
+        g.save()
+
+    # Update vehicle status and mobil count if applicable
+    v = Vehicle.objects.filter(organization=org, registration=payload.vehicle_reg.strip()).first()
+    if v:
+        det, _ = VehicleDetail.objects.get_or_create(vehicle=v)
+        if payload.status in ('Pending', 'In Progress'):
+            det.status = 'In Garage'
+        elif payload.status in ('Completed', 'Delivered'):
+            det.status = 'Available'
+        if payload.service_type == 'Oil Change':
+            det.last_mobil_date = payload.date
+        det.save()
+
+    return {'id': str(m.pk), 'maintenanceId': m.maintenance_id, 'totalCost': float(m.total_cost), 'success': True}
+
+@router.delete('/orgs/{org_id}/tasin-maintenance/{mnt_id}', auth=None)
+def delete_maintenance(request, org_id: int, mnt_id: int):
+    org = _get_org(request, org_id)
+    m = MaintenanceRecord.objects.filter(pk=mnt_id, organization=org).first()
+    if not m: raise ApiError(404, 'Maintenance record not found')
+    g = Garage.objects.filter(organization=org, name=m.garage_name).first()
+    if g:
+        g.total_bill = max(D(0), g.total_bill - m.total_cost)
+        g.save()
+    v = Vehicle.objects.filter(organization=org, registration=m.vehicle_reg).first()
+    if v:
+        det = getattr(v, 'detail', None)
+        if det and det.status == 'In Garage':
+            det.status = 'Available'
+            det.save()
+    m.delete()
+    return {'id': str(mnt_id), 'success': True}
 
 # ─── MODULE 10: ACCOUNTS & TRANSACTIONS ───────────────────────────────────────
 
@@ -1319,3 +1474,64 @@ def update_company_settings(request, org_id: int, payload: CompanyProfileIn):
     profile.timezone = payload.timezone.strip()
     profile.save()
     return {'success': True, 'companyName': profile.company_name}
+
+@router.get('/orgs/{org_id}/tasin-settings/users', auth=None)
+def list_system_users(request, org_id: int):
+    org = _get_org(request, org_id)
+    User = get_user_model()
+    memberships = Membership.objects.filter(organization=org).select_related('user')
+    out = []
+    for m in memberships:
+        out.append({
+            'id': str(m.user.pk),
+            'name': m.user.get_full_name() or m.user.username,
+            'username': m.user.username,
+            'email': m.user.email,
+            'role': m.role,
+            'isActive': m.user.is_active,
+            'dateJoined': m.user.date_joined.isoformat() if hasattr(m.user, 'date_joined') and m.user.date_joined else ''
+        })
+    if not out:
+        # Fallback to superusers/all users if no membership records
+        for u in User.objects.all()[:10]:
+            out.append({
+                'id': str(u.pk),
+                'name': u.get_full_name() or u.username,
+                'username': u.username,
+                'email': u.email,
+                'role': 'admin' if u.is_superuser else 'operations',
+                'isActive': u.is_active,
+                'dateJoined': u.date_joined.isoformat() if hasattr(u, 'date_joined') and u.date_joined else ''
+            })
+    return out
+
+@router.post('/orgs/{org_id}/tasin-settings/users', auth=None)
+def create_system_user(request, org_id: int, payload: UserCreateIn):
+    org = _get_org(request, org_id)
+    User = get_user_model()
+    if User.objects.filter(username=payload.username.strip()).exists():
+        raise ApiError(409, f"User with username '{payload.username}' already exists")
+    with transaction.atomic():
+        user = User.objects.create_user(
+            username=payload.username.strip(),
+            email=payload.email.strip(),
+            password=payload.password
+        )
+        Membership.objects.create(
+            organization=org,
+            user=user,
+            role=payload.role
+        )
+    return {'id': str(user.pk), 'username': user.username, 'role': payload.role, 'success': True}
+
+@router.delete('/orgs/{org_id}/tasin-settings/users/{user_id}', auth=None)
+def delete_system_user(request, org_id: int, user_id: int):
+    org = _get_org(request, org_id)
+    User = get_user_model()
+    user = User.objects.filter(pk=user_id).first()
+    if not user:
+        raise ApiError(404, 'User not found')
+    Membership.objects.filter(organization=org, user=user).delete()
+    user.is_active = False
+    user.save()
+    return {'id': str(user_id), 'success': True}

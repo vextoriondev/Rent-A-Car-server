@@ -27,6 +27,8 @@ class VehicleDetail(models.Model):
     agreement_start = models.DateField(null=True, blank=True)
     agreement_end = models.DateField(null=True, blank=True)
     assigned_driver = models.ForeignKey(Party, null=True, blank=True, on_delete=models.SET_NULL, related_name='assigned_vehicle_details')
+    mobil_count = models.PositiveIntegerField(default=0)
+    last_mobil_date = models.DateField(null=True, blank=True)
 
 class PartyDetail(models.Model):
     """Extended details for Owner, Driver, and Client (Modules 02, 04, 05)."""
