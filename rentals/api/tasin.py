@@ -11,13 +11,21 @@ from ..models import (
     Organization, Membership, Party, Vehicle,
     VehicleDetail, PartyDetail, Duty, Garage, MaintenanceRecord,
     VehiclePaper, FinancialAccount, AccountTransaction, SystemAlert, CompanyProfile,
-    TasinInvoice, TasinInvoiceItem, TasinInvoicePayment
+    TasinInvoice, TasinInvoiceItem, TasinInvoicePayment,
+    DriverAttendance, SparePart, PartConsumption, DueFollowUp,
+    CustomReminder, TripDispatch, PrivateDocument, Agreement
 )
 from ..services.tasin import (
     get_dashboard_kpis, get_or_create_company_profile,
     generate_invoice_number, calculate_vehicle_profitability,
-    get_document_expiries_report, get_account_ledger_report
+    get_document_expiries_report, get_account_ledger_report,
+    calculate_previous_month_comparison, auto_increment_mobil_count,
+    get_driver_attendance_register, dispatch_duty_trip_sheet,
+    check_duplicate_expense, renew_agreement_service,
+    reconcile_bank_statement, build_custom_report,
+    generate_organization_backup
 )
+from ..rbac import get_user_permissions_payload, get_user_role, check_permission
 
 router = Router()
 D = Decimal
@@ -241,6 +249,83 @@ class InvoicePaymentIn(Schema):
     reference: Optional[str] = ''
     notes: Optional[str] = ''
 
+class AttendanceIn(Schema):
+    driver_id: int
+    date: date
+    status: Literal['Present', 'Absent', 'On Duty', 'Leave'] = 'Present'
+    duty_id: Optional[int] = None
+    notes: Optional[str] = ''
+
+class DispatchIn(Schema):
+    channel: Literal['SMS', 'WhatsApp'] = 'SMS'
+
+class SparePartIn(Schema):
+    part_code: str
+    name: str
+    category: str = 'Mobil/Oil'
+    unit: str = 'Litre'
+    quantity: Decimal = D(0)
+    cost_per_unit: Decimal = D(0)
+    supplier: Optional[str] = ''
+    low_stock_threshold: Decimal = D(5)
+    notes: Optional[str] = ''
+
+class PartConsumeIn(Schema):
+    maintenance_id: int
+    quantity: Decimal = D(1)
+    date: Optional[date] = None
+
+class DueFollowUpIn(Schema):
+    party_id: int
+    party_type: str = 'Customer'
+    follow_up_date: date
+    contact_method: Literal['Phone Call', 'WhatsApp', 'In Person', 'Email'] = 'Phone Call'
+    notes: str
+    next_follow_up_date: Optional[date] = None
+    responsible_staff: Optional[str] = ''
+    status: Literal['Pending', 'Completed', 'Overdue'] = 'Pending'
+
+class CustomReminderIn(Schema):
+    title: str
+    reminder_date: date
+    reminder_time: str = '09:00 AM'
+    description: Optional[str] = ''
+    related_entity_type: str = 'General'
+    related_entity_id: Optional[str] = ''
+    assigned_staff: Optional[str] = ''
+    status: Literal['Pending', 'Completed', 'Overdue'] = 'Pending'
+
+class CustomReportIn(Schema):
+    module: str
+    fields: list[str] = []
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    status_filter: Optional[str] = None
+
+class BankReconRowIn(Schema):
+    date: str
+    amount: Decimal
+    type: Literal['Credit', 'Debit'] = 'Credit'
+    description: Optional[str] = ''
+    reference: Optional[str] = ''
+
+class BankReconIn(Schema):
+    account_id: int
+    rows: list[BankReconRowIn]
+
+class DocumentUploadIn(Schema):
+    entity_type: str
+    entity_id: str
+    document_type: str
+    file_name: str
+    file_base64: str
+    mime_type: str = 'application/pdf'
+
+class RenewAgreementIn(Schema):
+    new_start_date: date
+    new_end_date: date
+    new_monthly_rent: Decimal
+
 # ─── 0. SYSTEM HEALTH & CONNECTION CHECK (auth=None) ──────────────────────────
 
 @router.get('/health', auth=None)
@@ -308,7 +393,9 @@ def dashboard_kpis(request, org_id: int, date_filter: str | None = None, period:
                 target = date.fromisoformat(date_filter)
             except (ValueError, TypeError):
                 target = date.today()
-    return get_dashboard_kpis(org, target, period=period_mode)
+    kpis = get_dashboard_kpis(org, target, period=period_mode)
+    kpis['prev_month_comparison'] = calculate_previous_month_comparison(org)
+    return kpis
 
 # ─── MODULE 02: OWNERS MANAGEMENT ────────────────────────────────────────────
 
@@ -1885,4 +1972,326 @@ def report_account_ledger(request, org_id: int, account_id: Optional[int] = None
     sd = datetime.strptime(start_date, '%Y-%m-%d').date() if start_date else None
     ed = datetime.strptime(end_date, '%Y-%m-%d').date() if end_date else None
     return get_account_ledger_report(org, account_id, sd, ed)
+
+# ─── RBAC: PERMISSION VERIFICATION ENDPOINT ───────────────────────────────────
+
+@router.get('/orgs/{org_id}/rbac/permissions', auth=None)
+def get_my_permissions(request, org_id: int):
+    org = _get_org(request, org_id)
+    return get_user_permissions_payload(request.user if hasattr(request, 'user') else None, org)
+
+# ─── MODULE 04: DRIVER ATTENDANCE REGISTER ────────────────────────────────────
+
+@router.get('/orgs/{org_id}/driver-attendance', auth=None)
+def list_driver_attendance(request, org_id: int, year: Optional[int] = None, month: Optional[int] = None):
+    org = _get_org(request, org_id)
+    today = date.today()
+    y = year or today.year
+    m = month or today.month
+    return get_driver_attendance_register(org, y, m)
+
+@router.post('/orgs/{org_id}/driver-attendance', auth=None)
+def record_attendance(request, org_id: int, payload: AttendanceIn):
+    org = _get_org(request, org_id)
+    driver = Party.objects.filter(pk=payload.driver_id, organization=org).first()
+    if not driver:
+        raise ApiError(404, 'Driver not found')
+    att, created = DriverAttendance.objects.update_or_create(
+        organization=org,
+        driver=driver,
+        date=payload.date,
+        defaults={
+            'status': payload.status,
+            'duty_id': payload.duty_id,
+            'notes': payload.notes or ''
+        }
+    )
+    return {'id': str(att.pk), 'driver': driver.name, 'date': att.date.isoformat(), 'status': att.status, 'success': True}
+
+# ─── MODULE 06: TRIP DISPATCH VIA SMS / WHATSAPP ─────────────────────────────
+
+@router.post('/orgs/{org_id}/duties/{duty_id}/dispatch', auth=None)
+def dispatch_duty(request, org_id: int, duty_id: int, payload: DispatchIn):
+    org = _get_org(request, org_id)
+    duty = Duty.objects.filter(pk=duty_id, organization=org).first()
+    if not duty:
+        raise ApiError(404, 'Duty not found')
+    return dispatch_duty_trip_sheet(duty, payload.channel)
+
+@router.get('/orgs/{org_id}/duties/{duty_id}/dispatches', auth=None)
+def get_duty_dispatches(request, org_id: int, duty_id: int):
+    org = _get_org(request, org_id)
+    qs = TripDispatch.objects.filter(duty_id=duty_id).order_by('-sent_at')
+    return [{
+        'id': str(d.pk),
+        'channel': d.channel,
+        'driverPhone': d.driver_phone,
+        'status': d.status,
+        'sentAt': d.sent_at.isoformat(),
+        'providerId': d.provider_id,
+        'payload': d.dispatch_payload
+    } for d in qs]
+
+# ─── MODULE 08: SPARE PARTS INVENTORY ─────────────────────────────────────────
+
+@router.get('/orgs/{org_id}/spare-parts', auth=None)
+def list_spare_parts(request, org_id: int):
+    org = _get_org(request, org_id)
+    qs = SparePart.objects.filter(organization=org).order_by('name')
+    return [{
+        'id': str(p.pk),
+        'partCode': p.part_code,
+        'name': p.name,
+        'category': p.category,
+        'unit': p.unit,
+        'quantity': float(p.quantity),
+        'costPerUnit': float(p.cost_per_unit),
+        'supplier': p.supplier,
+        'lowStockThreshold': float(p.low_stock_threshold),
+        'isLowStock': p.quantity <= p.low_stock_threshold,
+        'notes': p.notes
+    } for p in qs]
+
+@router.post('/orgs/{org_id}/spare-parts', auth=None)
+def create_or_update_spare_part(request, org_id: int, payload: SparePartIn):
+    org = _get_org(request, org_id)
+    p, created = SparePart.objects.update_or_create(
+        organization=org,
+        part_code=payload.part_code.strip(),
+        defaults={
+            'name': payload.name.strip(),
+            'category': payload.category,
+            'unit': payload.unit,
+            'quantity': payload.quantity,
+            'cost_per_unit': payload.cost_per_unit,
+            'supplier': payload.supplier or '',
+            'low_stock_threshold': payload.low_stock_threshold,
+            'notes': payload.notes or ''
+        }
+    )
+    return {'id': str(p.pk), 'partCode': p.part_code, 'name': p.name, 'quantity': float(p.quantity), 'success': True}
+
+@router.post('/orgs/{org_id}/spare-parts/{part_id}/consume', auth=None)
+def consume_spare_part(request, org_id: int, part_id: int, payload: PartConsumeIn):
+    org = _get_org(request, org_id)
+    part = SparePart.objects.filter(pk=part_id, organization=org).first()
+    if not part:
+        raise ApiError(404, 'Spare part not found')
+    mnt = MaintenanceRecord.objects.filter(pk=payload.maintenance_id, organization=org).first()
+    if not mnt:
+        raise ApiError(404, 'Maintenance record not found')
+        
+    with transaction.atomic():
+        part.quantity -= payload.quantity
+        part.save()
+        total_c = payload.quantity * part.cost_per_unit
+        c = PartConsumption.objects.create(
+            maintenance_record=mnt,
+            spare_part=part,
+            quantity=payload.quantity,
+            unit_cost=part.cost_per_unit,
+            total_cost=total_c,
+            date=payload.date or date.today()
+        )
+        mnt.parts_cost += total_c
+        mnt.total_cost += total_c
+        mnt.save()
+        
+    return {'id': str(c.pk), 'remainingStock': float(part.quantity), 'costAdded': float(total_c), 'success': True}
+
+# ─── MODULE 11: DEBTOR FOLLOW-UP MANAGEMENT ───────────────────────────────────
+
+@router.get('/orgs/{org_id}/due-followups', auth=None)
+def list_due_followups(request, org_id: int, party_id: Optional[int] = None, status: Optional[str] = None):
+    org = _get_org(request, org_id)
+    qs = DueFollowUp.objects.filter(organization=org).select_related('party')
+    if party_id:
+        qs = qs.filter(party_id=party_id)
+    if status and status != 'all':
+        qs = qs.filter(status=status)
+    return [{
+        'id': str(f.pk),
+        'partyId': str(f.party_id),
+        'partyName': f.party.name,
+        'partyType': f.party_type,
+        'followUpDate': f.follow_up_date.isoformat(),
+        'contactMethod': f.contact_method,
+        'notes': f.notes,
+        'nextFollowUpDate': f.next_follow_up_date.isoformat() if f.next_follow_up_date else None,
+        'status': f.status,
+        'responsibleStaff': f.responsible_staff
+    } for f in qs]
+
+@router.post('/orgs/{org_id}/due-followups', auth=None)
+def create_due_followup(request, org_id: int, payload: DueFollowUpIn):
+    org = _get_org(request, org_id)
+    party = Party.objects.filter(pk=payload.party_id, organization=org).first()
+    if not party:
+        raise ApiError(404, 'Party not found')
+    f = DueFollowUp.objects.create(
+        organization=org,
+        party=party,
+        party_type=payload.party_type,
+        follow_up_date=payload.follow_up_date,
+        contact_method=payload.contact_method,
+        notes=payload.notes,
+        next_follow_up_date=payload.next_follow_up_date,
+        responsible_staff=payload.responsible_staff or '',
+        status=payload.status
+    )
+    return {'id': str(f.pk), 'success': True}
+
+@router.patch('/orgs/{org_id}/due-followups/{followup_id}', auth=None)
+def update_due_followup_status(request, org_id: int, followup_id: int, status: str):
+    org = _get_org(request, org_id)
+    f = DueFollowUp.objects.filter(pk=followup_id, organization=org).first()
+    if not f:
+        raise ApiError(404, 'Follow-up not found')
+    f.status = status
+    f.save()
+    return {'id': str(f.pk), 'status': f.status, 'success': True}
+
+# ─── MODULE 14: CUSTOM REMINDERS & TO-DOS ────────────────────────────────────
+
+@router.get('/orgs/{org_id}/custom-reminders', auth=None)
+def list_custom_reminders(request, org_id: int):
+    org = _get_org(request, org_id)
+    qs = CustomReminder.objects.filter(organization=org).order_by('reminder_date')
+    return [{
+        'id': str(r.pk),
+        'title': r.title,
+        'reminderDate': r.reminder_date.isoformat(),
+        'reminderTime': r.reminder_time,
+        'description': r.description,
+        'relatedEntityType': r.related_entity_type,
+        'relatedEntityId': r.related_entity_id,
+        'assignedStaff': r.assigned_staff,
+        'status': r.status
+    } for r in qs]
+
+@router.post('/orgs/{org_id}/custom-reminders', auth=None)
+def create_custom_reminder(request, org_id: int, payload: CustomReminderIn):
+    org = _get_org(request, org_id)
+    r = CustomReminder.objects.create(
+        organization=org,
+        title=payload.title,
+        reminder_date=payload.reminder_date,
+        reminder_time=payload.reminder_time,
+        description=payload.description or '',
+        related_entity_type=payload.related_entity_type,
+        related_entity_id=payload.related_entity_id or '',
+        assigned_staff=payload.assigned_staff or '',
+        status=payload.status
+    )
+    return {'id': str(r.pk), 'title': r.title, 'success': True}
+
+@router.patch('/orgs/{org_id}/custom-reminders/{reminder_id}', auth=None)
+def update_custom_reminder(request, org_id: int, reminder_id: int, status: str):
+    org = _get_org(request, org_id)
+    r = CustomReminder.objects.filter(pk=reminder_id, organization=org).first()
+    if not r: raise ApiError(404, 'Reminder not found')
+    r.status = status
+    r.save()
+    return {'id': str(r.pk), 'status': r.status, 'success': True}
+
+@router.delete('/orgs/{org_id}/custom-reminders/{reminder_id}', auth=None)
+def delete_custom_reminder(request, org_id: int, reminder_id: int):
+    org = _get_org(request, org_id)
+    CustomReminder.objects.filter(pk=reminder_id, organization=org).delete()
+    return {'success': True}
+
+# ─── MODULE 09: AGREEMENT RENEWAL WORKFLOW ───────────────────────────────────
+
+@router.post('/orgs/{org_id}/agreements/{agreement_id}/renew', auth=None)
+def renew_agreement_endpoint(request, org_id: int, agreement_id: int, payload: RenewAgreementIn):
+    org = _get_org(request, org_id)
+    agreement = Agreement.objects.filter(pk=agreement_id, organization=org).first()
+    if not agreement:
+        raise ApiError(404, 'Agreement not found')
+    return renew_agreement_service(agreement, payload.new_start_date, payload.new_end_date, payload.new_monthly_rent)
+
+# ─── MODULE 10: BANK RECONCILIATION ──────────────────────────────────────────
+
+@router.post('/orgs/{org_id}/bank-reconciliation/match', auth=None)
+def match_bank_statement(request, org_id: int, payload: BankReconIn):
+    org = _get_org(request, org_id)
+    rows_data = [r.dict() for r in payload.rows]
+    return reconcile_bank_statement(org, payload.account_id, rows_data)
+
+# ─── MODULE 13: AD-HOC CUSTOM REPORT BUILDER ─────────────────────────────────
+
+@router.post('/orgs/{org_id}/reports/custom-builder', auth=None)
+def custom_report_builder_endpoint(request, org_id: int, payload: CustomReportIn):
+    org = _get_org(request, org_id)
+    return build_custom_report(org, payload.module, payload.fields, payload.start_date, payload.end_date, payload.status_filter)
+
+# ─── MODULE 15: SECURE DATABASE BACKUP GENERATION ────────────────────────────
+
+@router.get('/orgs/{org_id}/backup/download', auth=None)
+def download_database_backup(request, org_id: int):
+    org = _get_org(request, org_id)
+    backup_json = generate_organization_backup(org)
+    from django.http import HttpResponse
+    resp = HttpResponse(backup_json, content_type='application/json')
+    filename = f"tasin_backup_{org.pk}_{date.today().isoformat()}.json"
+    resp['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return resp
+
+# ─── DOCUMENT UPLOADS & FILE STORAGE ─────────────────────────────────────────
+
+@router.post('/orgs/{org_id}/documents/upload', auth=None)
+def upload_private_document(request, org_id: int, payload: DocumentUploadIn):
+    import base64
+    import os
+    from django.conf import settings
+    org = _get_org(request, org_id)
+    
+    # Decode base64
+    try:
+        file_bytes = base64.b64decode(payload.file_base64)
+    except Exception:
+        raise ApiError(400, 'Invalid base64 payload')
+        
+    # Safe storage directory
+    media_root = getattr(settings, 'PRIVATE_MEDIA_ROOT', os.path.join(settings.BASE_DIR, 'private_media'))
+    org_dir = os.path.join(media_root, f'org_{org.pk}', payload.entity_type.lower())
+    os.makedirs(org_dir, exist_ok=True)
+    
+    clean_filename = f"{int(datetime.now().timestamp())}_{payload.file_name.replace(' ', '_')}"
+    file_path = os.path.join(org_dir, clean_filename)
+    with open(file_path, 'wb') as f:
+        f.write(file_bytes)
+        
+    doc = PrivateDocument.objects.create(
+        organization=org,
+        entity_type=payload.entity_type,
+        entity_id=payload.entity_id,
+        document_type=payload.document_type,
+        file_name=payload.file_name,
+        file_path=os.path.relpath(file_path, settings.BASE_DIR),
+        file_size=len(file_bytes),
+        mime_type=payload.mime_type
+    )
+    return {
+        'id': str(doc.pk),
+        'fileName': doc.file_name,
+        'documentType': doc.document_type,
+        'fileSize': doc.file_size,
+        'uploadedAt': doc.uploaded_at.isoformat(),
+        'success': True
+    }
+
+@router.get('/orgs/{org_id}/documents', auth=None)
+def list_private_documents(request, org_id: int, entity_type: str, entity_id: str):
+    org = _get_org(request, org_id)
+    qs = PrivateDocument.objects.filter(organization=org, entity_type=entity_type, entity_id=entity_id)
+    return [{
+        'id': str(d.pk),
+        'fileName': d.file_name,
+        'documentType': d.document_type,
+        'fileSize': d.file_size,
+        'mimeType': d.mime_type,
+        'uploadedAt': d.uploaded_at.isoformat()
+    } for d in qs]
+
 

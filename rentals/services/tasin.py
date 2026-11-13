@@ -6,7 +6,9 @@ from ..models import (
     Organization, Party, Vehicle,
     VehicleDetail, PartyDetail, Duty, Garage, MaintenanceRecord,
     VehiclePaper, FinancialAccount, AccountTransaction, SystemAlert, CompanyProfile,
-    TasinInvoice, TasinInvoiceItem, TasinInvoicePayment
+    TasinInvoice, TasinInvoiceItem, TasinInvoicePayment,
+    DriverAttendance, SparePart, PartConsumption, DueFollowUp,
+    CustomReminder, TripDispatch, PrivateDocument, Agreement, AgreementVersion
 )
 
 D = Decimal
@@ -637,4 +639,380 @@ def get_account_ledger_report(org: Organization, account_id=None, start_date=Non
         'totalCredit': float(total_credit),
         'transactions': ledger_rows
     }
+
+
+def calculate_previous_month_comparison(org: Organization):
+    """
+    Module 01: Month-over-Month Comparative Analytics
+    Calculates dynamic percentage delta for Revenue, Expenses, Duties, and Net Profit.
+    """
+    today = date.today()
+    # Current month
+    curr_start = today.replace(day=1)
+    
+    # Previous month
+    if curr_start.month == 1:
+        prev_start = date(curr_start.year - 1, 12, 1)
+        prev_end = date(curr_start.year - 1, 12, 31)
+    else:
+        prev_start = date(curr_start.year, curr_start.month - 1, 1)
+        prev_end = curr_start - timedelta(days=1)
+        
+    curr_txns = AccountTransaction.objects.filter(organization=org, date__gte=curr_start, date__lte=today)
+    prev_txns = AccountTransaction.objects.filter(organization=org, date__gte=prev_start, date__lte=prev_end)
+    
+    curr_rev = curr_txns.filter(transaction_type='Income').aggregate(s=Sum('amount'))['s'] or D(0)
+    prev_rev = prev_txns.filter(transaction_type='Income').aggregate(s=Sum('amount'))['s'] or D(0)
+    
+    curr_exp = curr_txns.filter(transaction_type='Expense').aggregate(s=Sum('amount'))['s'] or D(0)
+    prev_exp = prev_txns.filter(transaction_type='Expense').aggregate(s=Sum('amount'))['s'] or D(0)
+    
+    curr_profit = curr_rev - curr_exp
+    prev_profit = prev_rev - prev_exp
+    
+    curr_duties = Duty.objects.filter(organization=org, date__gte=curr_start, date__lte=today).count()
+    prev_duties = Duty.objects.filter(organization=org, date__gte=prev_start, date__lte=prev_end).count()
+    
+    def calc_delta(curr, prev):
+        if prev > 0:
+            return round(float((curr - prev) / prev * 100), 1)
+        elif curr > 0:
+            return 100.0
+        return 0.0
+
+    return {
+        'revenue_delta_pct': calc_delta(curr_rev, prev_rev),
+        'expense_delta_pct': calc_delta(curr_exp, prev_exp),
+        'profit_delta_pct': calc_delta(curr_profit, prev_profit),
+        'duties_delta_pct': calc_delta(curr_duties, prev_duties),
+        'prev_revenue': float(prev_rev),
+        'prev_expenses': float(prev_exp),
+        'prev_profit': float(prev_profit),
+        'prev_duties': prev_duties
+    }
+
+
+def auto_increment_mobil_count(vehicle_reg: str, org: Organization):
+    """
+    Module 08: Auto Mobil Counter Increment
+    Increments mobil_count and updates last_mobil_date on VehicleDetail.
+    """
+    v = Vehicle.objects.filter(organization=org, registration=vehicle_reg).first()
+    if v and hasattr(v, 'detail'):
+        det = v.detail
+        det.mobil_count += 1
+        det.last_mobil_date = date.today()
+        det.save()
+        return det.mobil_count
+    return 0
+
+
+def get_driver_attendance_register(org: Organization, year: int, month: int):
+    """
+    Module 04: Monthly Driver Attendance Register
+    Returns daily matrix with summary for each driver.
+    """
+    import calendar
+    num_days = calendar.monthrange(year, month)[1]
+    start_d = date(year, month, 1)
+    end_d = date(year, month, num_days)
+    
+    drivers = Party.objects.filter(organization=org, kind=Party.Kind.DRIVER).select_related('detail')
+    attendances = DriverAttendance.objects.filter(
+        organization=org, date__gte=start_d, date__lte=end_d
+    ).select_related('driver')
+    
+    # Map (driver_id, day) -> status
+    att_map = {}
+    for a in attendances:
+        att_map[(a.driver_id, a.date.day)] = {
+            'status': a.status,
+            'notes': a.notes,
+            'duty_id': a.duty_id
+        }
+        
+    rows = []
+    for d in drivers:
+        daily_records = []
+        counts = {'Present': 0, 'Absent': 0, 'On Duty': 0, 'Leave': 0}
+        for day in range(1, num_days + 1):
+            rec = att_map.get((d.id, day), {'status': 'Present', 'notes': '', 'duty_id': None})
+            counts[rec['status']] = counts.get(rec['status'], 0) + 1
+            daily_records.append({
+                'day': day,
+                'status': rec['status'],
+                'notes': rec['notes']
+            })
+            
+        rows.append({
+            'driver_id': d.id,
+            'name': d.name,
+            'phone': d.phone,
+            'vehicle': d.detail.assigned_vehicle.registration if getattr(d, 'detail', None) and d.detail.assigned_vehicle else 'Unassigned',
+            'daily_records': daily_records,
+            'summary': counts,
+            'total_present': counts['Present'] + counts['On Duty']
+        })
+        
+    return {
+        'year': year,
+        'month': month,
+        'days_in_month': num_days,
+        'drivers': rows
+    }
+
+
+def dispatch_duty_trip_sheet(duty: Duty, channel: str = 'SMS'):
+    """
+    Module 06: SMS/WhatsApp Trip Sheet Dispatch
+    Dispatches trip details to driver with sandbox adapter.
+    """
+    driver_phone = duty.driver.phone if duty.driver else ''
+    if not driver_phone:
+        driver_phone = '+880 1700-000000'
+        
+    message = (
+        f"TASIN ENTERPRISE TRIP SHEET #{duty.duty_id}\n"
+        f"Date: {duty.date}\n"
+        f"Client: {duty.client_name}\n"
+        f"Vehicle: {duty.vehicle_reg}\n"
+        f"Pickup: {duty.pickup_location} ({duty.start_time})\n"
+        f"Destination: {duty.destination}\n"
+        f"Passenger Contact: {duty.customer_contact or 'N/A'}\n"
+        f"Rent: BDT {duty.total_amount}"
+    )
+    
+    # Sandbox Dispatch Provider
+    dispatch = TripDispatch.objects.create(
+        duty=duty,
+        driver_phone=driver_phone,
+        channel=channel,
+        dispatch_payload=message,
+        status='Sent',
+        provider_id=f'SANDBOX-{int(datetime.now().timestamp())}'
+    )
+    return {
+        'dispatch_id': dispatch.id,
+        'channel': channel,
+        'status': dispatch.status,
+        'driver_phone': driver_phone,
+        'provider_id': dispatch.provider_id,
+        'message_preview': message
+    }
+
+
+def check_duplicate_expense(org: Organization, vehicle_reg: str, expense_date: date, amount: Decimal, category: str):
+    """
+    Module 07: Duplicate Expense Warning
+    Detects if same expense was logged within today for the same vehicle & amount.
+    """
+    existing = AccountTransaction.objects.filter(
+        organization=org,
+        transaction_type='Expense',
+        category=category,
+        date=expense_date,
+        amount=amount,
+        vehicle_reg=vehicle_reg
+    ).first()
+    if existing:
+        return {
+            'is_duplicate': True,
+            'matched_id': existing.transaction_id,
+            'date': existing.date.isoformat(),
+            'amount': float(existing.amount),
+            'warning': f"Possible duplicate expense detected: TX #{existing.transaction_id} on {existing.date} for BDT {existing.amount}."
+        }
+    return {'is_duplicate': False}
+
+
+def renew_agreement_service(agreement: Agreement, new_start_date: date, new_end_date: date, new_monthly_rent: Decimal):
+    """
+    Module 09: One-Click Agreement Renewal
+    Clones terms into a new version and marks the previous version superseded.
+    """
+    with transaction.atomic():
+        # Archive previous active version
+        active_ver = agreement.versions.filter(status='active').first()
+        if active_ver:
+            active_ver.status = 'superseded'
+            active_ver.save()
+            new_ver_num = active_ver.number + 1
+        else:
+            new_ver_num = 1
+            
+        new_version = AgreementVersion.objects.create(
+            agreement=agreement,
+            number=new_ver_num,
+            start_date=new_start_date,
+            end_date=new_end_date,
+            monthly_rent=new_monthly_rent,
+            status='active'
+        )
+        agreement.start_date = new_start_date
+        agreement.end_date = new_end_date
+        agreement.save()
+        
+        return {
+            'agreement_id': agreement.id,
+            'new_version': new_ver_num,
+            'start_date': new_start_date.isoformat(),
+            'end_date': new_end_date.isoformat(),
+            'monthly_rent': float(new_monthly_rent),
+            'status': 'Renewed'
+        }
+
+
+def reconcile_bank_statement(org: Organization, account_id: int, bank_rows: list):
+    """
+    Module 10: Bank Reconciliation Engine
+    Matches uploaded bank statement rows against AccountTransaction rows.
+    """
+    account = FinancialAccount.objects.filter(organization=org, pk=account_id).first()
+    system_txns = list(AccountTransaction.objects.filter(organization=org).order_by('date'))
+    
+    matched = []
+    unmatched = []
+    total_bank_amount = D(0)
+    
+    for row in bank_rows:
+        row_date = row.get('date')
+        row_amount = D(str(row.get('amount', 0)))
+        row_desc = row.get('description', '')
+        row_ref = row.get('reference', '')
+        row_type = row.get('type', 'Credit') # Credit (Inflow) or Debit (Outflow)
+        total_bank_amount += row_amount
+        
+        # Match candidate
+        match_found = False
+        for st in system_txns:
+            if abs(st.amount - row_amount) < D('0.01'):
+                matched.append({
+                    'bank_row': row,
+                    'system_txn': {
+                        'id': st.transaction_id,
+                        'date': st.date.isoformat(),
+                        'amount': float(st.amount),
+                        'category': st.category,
+                        'party': st.related_person or st.vehicle_reg or 'General'
+                    },
+                    'status': 'MATCHED'
+                })
+                match_found = True
+                break
+                
+        if not match_found:
+            unmatched.append({
+                'bank_row': row,
+                'status': 'UNMATCHED',
+                'reason': 'No matching transaction found with identical amount'
+            })
+            
+    return {
+        'account_name': account.name if account else 'Account',
+        'total_rows_processed': len(bank_rows),
+        'matched_count': len(matched),
+        'unmatched_count': len(unmatched),
+        'matched': matched,
+        'unmatched': unmatched,
+        'difference_amount': float(sum((D(str(u['bank_row'].get('amount', 0))) for u in unmatched), D(0)))
+    }
+
+
+def build_custom_report(org: Organization, module: str, fields: list, start_date=None, end_date=None, status_filter=None):
+    """
+    Module 13: Ad-hoc Custom Report Builder (Safe Allowlisted Fields)
+    """
+    result_rows = []
+    allowed_modules = ['vehicles', 'duties', 'invoices', 'expenses', 'maintenance', 'drivers', 'owners', 'clients']
+    if module not in allowed_modules:
+        return {'error': f'Module {module} not permitted', 'rows': []}
+        
+    if module == 'vehicles':
+        qs = Vehicle.objects.filter(organization=org).select_related('detail')
+        if status_filter:
+            qs = qs.filter(detail__status=status_filter)
+        for v in qs:
+            det = getattr(v, 'detail', None)
+            row = {
+                'id': v.id,
+                'registration': v.registration,
+                'brand': det.brand if det else '',
+                'model': det.model if det else '',
+                'year': det.year if det else '',
+                'category': det.category if det else '',
+                'status': det.status if det else 'Available',
+                'monthly_rent': float(det.monthly_rent) if det else 0,
+                'mobil_count': det.mobil_count if det else 0,
+                'owner': v.owner.name if getattr(v, 'owner', None) else 'Company Fleet'
+            }
+            result_rows.append({k: row.get(k, '') for k in fields} if fields else row)
+            
+    elif module == 'duties':
+        qs = Duty.objects.filter(organization=org)
+        if start_date:
+            qs = qs.filter(date__gte=start_date)
+        if end_date:
+            qs = qs.filter(date__lte=end_date)
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        for d in qs:
+            row = {
+                'duty_id': d.duty_id,
+                'date': d.date.isoformat(),
+                'client': d.client_name,
+                'vehicle': d.vehicle_reg,
+                'driver': d.driver_name,
+                'pickup': d.pickup_location,
+                'destination': d.destination,
+                'rent': float(d.agreed_rent),
+                'total': float(d.total_amount),
+                'status': d.status,
+                'is_invoiced': 'Yes' if d.is_invoiced else 'No'
+            }
+            result_rows.append({k: row.get(k, '') for k in fields} if fields else row)
+
+    elif module == 'expenses':
+        qs = AccountTransaction.objects.filter(organization=org, transaction_type='Expense')
+        if start_date:
+            qs = qs.filter(date__gte=start_date)
+        if end_date:
+            qs = qs.filter(date__lte=end_date)
+        for e in qs:
+            row = {
+                'id': e.transaction_id,
+                'date': e.date.isoformat(),
+                'category': e.category,
+                'amount': float(e.amount),
+                'vehicle': e.vehicle_reg or 'General',
+                'description': e.description,
+                'method': e.payment_method
+            }
+            result_rows.append({k: row.get(k, '') for k in fields} if fields else row)
+
+    return {
+        'module': module,
+        'count': len(result_rows),
+        'fields': fields if fields else (list(result_rows[0].keys()) if result_rows else []),
+        'rows': result_rows
+    }
+
+
+def generate_organization_backup(org: Organization):
+    """
+    Module 15: Safe Database Backup Generator
+    Serializes organization records to secure JSON dump.
+    """
+    import json
+    data = {
+        'organization': org.name,
+        'generated_at': datetime.now().isoformat(),
+        'vehicles': list(Vehicle.objects.filter(organization=org).values('id', 'registration', 'model_name')),
+        'parties': list(Party.objects.filter(organization=org).values('id', 'name', 'phone', 'kind')),
+        'duties_count': Duty.objects.filter(organization=org).count(),
+        'invoices_count': TasinInvoice.objects.filter(organization=org).count(),
+        'transactions_count': AccountTransaction.objects.filter(organization=org).count(),
+        'accounts': list(FinancialAccount.objects.filter(organization=org).values('id', 'name', 'account_type', 'current_balance')),
+    }
+    return json.dumps(data, indent=2, default=str)
+
 

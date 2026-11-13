@@ -29,6 +29,7 @@ class VehicleDetail(models.Model):
     assigned_driver = models.ForeignKey(Party, null=True, blank=True, on_delete=models.SET_NULL, related_name='assigned_vehicle_details')
     mobil_count = models.PositiveIntegerField(default=0)
     last_mobil_date = models.DateField(null=True, blank=True)
+    photo_url = models.CharField(max_length=255, blank=True, default='')
 
 class PartyDetail(models.Model):
     """Extended details for Owner, Driver, and Client (Modules 02, 04, 05)."""
@@ -54,6 +55,12 @@ class PartyDetail(models.Model):
     monthly_salary = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     daily_allowance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     advance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    fuel_advance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    gas_advance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    reference_info = models.TextField(blank=True, default='')
+    photo_url = models.CharField(max_length=255, blank=True, default='')
+    nid_doc_url = models.CharField(max_length=255, blank=True, default='')
+    trade_license_doc_url = models.CharField(max_length=255, blank=True, default='')
     total_paid_driver = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     assigned_vehicle = models.ForeignKey(Vehicle, null=True, blank=True, on_delete=models.SET_NULL, related_name='assigned_driver_parties')
     # Owner specific
@@ -308,6 +315,152 @@ class TasinInvoicePayment(models.Model):
     reference = models.CharField(max_length=120, blank=True, default='')
     notes = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class DriverAttendance(models.Model):
+    """Driver Attendance Register (Module 04)."""
+    STATUS_CHOICES = [
+        ('Present', 'Present'),
+        ('Absent', 'Absent'),
+        ('On Duty', 'On Duty'),
+        ('Leave', 'Leave')
+    ]
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='driver_attendances')
+    driver = models.ForeignKey(Party, on_delete=models.CASCADE, related_name='attendances')
+    date = models.DateField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Present')
+    duty = models.ForeignKey(Duty, null=True, blank=True, on_delete=models.SET_NULL, related_name='attendances')
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-date', 'driver__name']
+        constraints = [
+            models.UniqueConstraint(fields=['organization', 'driver', 'date'], name='unique_driver_daily_attendance')
+        ]
+
+
+class SparePart(models.Model):
+    """Spare Parts & Mobil Inventory (Module 08)."""
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='spare_parts')
+    part_code = models.CharField(max_length=40, db_index=True) # e.g. PRT-MOB-01
+    name = models.CharField(max_length=180)
+    category = models.CharField(max_length=80, default='Mobil/Oil') # Mobil/Oil, Tyre, Brake, Filter, Battery, Electrical, Other
+    unit = models.CharField(max_length=30, default='Litre') # Litre, Piece, Set
+    quantity = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    cost_per_unit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    supplier = models.CharField(max_length=180, blank=True, default='')
+    low_stock_threshold = models.DecimalField(max_digits=10, decimal_places=2, default=5)
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        constraints = [
+            models.UniqueConstraint(fields=['organization', 'part_code'], name='unique_org_part_code')
+        ]
+
+
+class PartConsumption(models.Model):
+    """Parts Consumed in Maintenance (Module 08)."""
+    maintenance_record = models.ForeignKey(MaintenanceRecord, on_delete=models.CASCADE, related_name='consumptions')
+    spare_part = models.ForeignKey(SparePart, on_delete=models.CASCADE, related_name='consumptions')
+    quantity = models.DecimalField(max_digits=8, decimal_places=2, default=1)
+    unit_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    date = models.DateField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class DueFollowUp(models.Model):
+    """Debtor Follow-up Management (Module 11)."""
+    STATUS_CHOICES = [
+        ('Pending', 'Pending'),
+        ('Completed', 'Completed'),
+        ('Overdue', 'Overdue')
+    ]
+    METHOD_CHOICES = [
+        ('Phone Call', 'Phone Call'),
+        ('WhatsApp', 'WhatsApp'),
+        ('In Person', 'In Person'),
+        ('Email', 'Email')
+    ]
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='due_followups')
+    party = models.ForeignKey(Party, on_delete=models.CASCADE, related_name='followups')
+    party_type = models.CharField(max_length=20, default='Customer') # Customer, Owner, Driver, Garage
+    follow_up_date = models.DateField()
+    contact_method = models.CharField(max_length=30, choices=METHOD_CHOICES, default='Phone Call')
+    notes = models.TextField()
+    next_follow_up_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending')
+    responsible_staff = models.CharField(max_length=120, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-follow_up_date', '-id']
+
+
+class CustomReminder(models.Model):
+    """Custom Reminders & To-Dos (Module 14)."""
+    STATUS_CHOICES = [
+        ('Pending', 'Pending'),
+        ('Completed', 'Completed'),
+        ('Overdue', 'Overdue')
+    ]
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='custom_reminders')
+    title = models.CharField(max_length=220)
+    reminder_date = models.DateField()
+    reminder_time = models.CharField(max_length=20, blank=True, default='09:00 AM')
+    description = models.TextField(blank=True, default='')
+    related_entity_type = models.CharField(max_length=40, blank=True, default='General') # Vehicle, Driver, Owner, Client, General
+    related_entity_id = models.CharField(max_length=64, blank=True, default='')
+    assigned_staff = models.CharField(max_length=120, blank=True, default='')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['reminder_date', 'id']
+
+
+class TripDispatch(models.Model):
+    """Trip Dispatch via SMS/WhatsApp (Module 06)."""
+    CHANNEL_CHOICES = [
+        ('SMS', 'SMS'),
+        ('WhatsApp', 'WhatsApp')
+    ]
+    STATUS_CHOICES = [
+        ('Sent', 'Sent'),
+        ('Delivered', 'Delivered'),
+        ('Failed', 'Failed'),
+        ('Queued', 'Queued')
+    ]
+    duty = models.ForeignKey(Duty, on_delete=models.CASCADE, related_name='dispatches')
+    driver_phone = models.CharField(max_length=40)
+    channel = models.CharField(max_length=20, choices=CHANNEL_CHOICES, default='SMS')
+    dispatch_payload = models.TextField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Sent')
+    provider_id = models.CharField(max_length=120, blank=True, default='')
+    error_message = models.TextField(blank=True, default='')
+    sent_at = models.DateTimeField(auto_now_add=True)
+
+
+class PrivateDocument(models.Model):
+    """Secure File Storage for NID, Licenses, Papers, Vouchers & Bills (All Modules)."""
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='private_documents')
+    entity_type = models.CharField(max_length=40) # Owner, Driver, Vehicle, Client, Maintenance, Expense, Transaction, Agreement, Company
+    entity_id = models.CharField(max_length=64)
+    document_type = models.CharField(max_length=60) # NID, Photo, License, Paper, Trade_License, Voucher, Bill, Agreement, Logo
+    file_name = models.CharField(max_length=255)
+    file_path = models.CharField(max_length=500) # relative path in private media or storage
+    file_size = models.PositiveIntegerField(default=0) # in bytes
+    mime_type = models.CharField(max_length=100, default='application/octet-stream')
+    uploaded_by = models.CharField(max_length=120, blank=True, default='')
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-uploaded_at']
+
 
 
 

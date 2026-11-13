@@ -3,7 +3,9 @@ from django.db import transaction
 from rentals.models import (
     Organization, Party, Vehicle, Duty, Garage, MaintenanceRecord,
     VehiclePaper, FinancialAccount, AccountTransaction, SystemAlert,
-    TasinInvoice, TasinInvoiceItem, TasinInvoicePayment
+    TasinInvoice, TasinInvoiceItem, TasinInvoicePayment,
+    DriverAttendance, SparePart, PartConsumption, DueFollowUp,
+    CustomReminder, TripDispatch, PrivateDocument
 )
 
 class Command(BaseCommand):
@@ -40,6 +42,13 @@ class Command(BaseCommand):
             garages = Garage.objects.filter(organization=org).delete()[0]
             accs = FinancialAccount.objects.filter(organization=org).delete()[0]
             alerts = SystemAlert.objects.filter(organization=org).delete()[0]
+            DriverAttendance.objects.filter(organization=org).delete()
+            PartConsumption.objects.filter(spare_part__organization=org).delete()
+            SparePart.objects.filter(organization=org).delete()
+            DueFollowUp.objects.filter(organization=org).delete()
+            CustomReminder.objects.filter(organization=org).delete()
+            TripDispatch.objects.filter(duty__organization=org).delete()
+            PrivateDocument.objects.filter(organization=org).delete()
             org.delete()
 
         self.stdout.write(self.style.SUCCESS(
@@ -53,3 +62,4 @@ class Command(BaseCommand):
             f"  - Accounts: {accs}\n"
             f"  - Alerts: {alerts}"
         ))
+
