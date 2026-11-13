@@ -1,11 +1,12 @@
 from decimal import Decimal
 from datetime import date, datetime
-from typing import Literal, Optional
+from typing import Literal, Optional, List, Dict, Any
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Sum, Q
 from django.http import HttpRequest
 from ninja import Router, Schema
+from django.utils import timezone
 from .errors import ApiError
 from ..models import (
     Organization, Membership, Party, Vehicle,
@@ -13,7 +14,8 @@ from ..models import (
     VehiclePaper, FinancialAccount, AccountTransaction, SystemAlert, CompanyProfile,
     TasinInvoice, TasinInvoiceItem, TasinInvoicePayment,
     DriverAttendance, SparePart, PartConsumption, DueFollowUp,
-    CustomReminder, TripDispatch, PrivateDocument, Agreement
+    CustomReminder, TripDispatch, PrivateDocument, Agreement,
+    UserProfile, UserModulePermission, AccessRequest, AuditEvent
 )
 from ..services.tasin import (
     get_dashboard_kpis, get_or_create_company_profile,
@@ -25,7 +27,12 @@ from ..services.tasin import (
     reconcile_bank_statement, build_custom_report,
     generate_organization_backup
 )
-from ..rbac import get_user_permissions_payload, get_user_role, check_permission
+from ..rbac import (
+    get_user_permissions_payload, get_user_role, check_permission,
+    is_super_admin, is_main_admin, can_admin_grant_permission,
+    can_admin_manage_target_user, get_user_module_permissions_map,
+    MODULE_REGISTRY, ALL_MODULE_KEYS, DEFAULT_ROLE_MODULE_ACTIONS
+)
 
 router = Router()
 D = Decimal
@@ -44,6 +51,37 @@ def _get_org(request: HttpRequest, org_id: int | None = None) -> Organization:
     if not org:
         org = Organization.objects.create(name='TASIN ENTERPRISE')
     return org
+
+def _resolve_actor(request: HttpRequest, org: Organization):
+    """
+    Resolves the user executing the operation for audit logs and RBAC checks.
+    Checks request.user first; if not authenticated, checks X-User-Id or X-Username header,
+    or falls back to the active superuser/admin of the organization.
+    """
+    user = getattr(request, 'user', None)
+    if user and user.is_authenticated:
+        return user
+    if hasattr(request, 'headers'):
+        uid_hdr = request.headers.get('X-User-Id')
+        uname_hdr = request.headers.get('X-Username')
+        User = get_user_model()
+        if uid_hdr:
+            u = User.objects.filter(pk=uid_hdr).first()
+            if u:
+                return u
+        if uname_hdr:
+            u = User.objects.filter(username=uname_hdr).first()
+            if u:
+                return u
+    # Fallback to org admin or first superuser
+    m = Membership.objects.filter(organization=org, role='admin').select_related('user').first()
+    if m and m.user:
+        return m.user
+    User = get_user_model()
+    su = User.objects.filter(is_superuser=True).first()
+    if su:
+        return su
+    return User.objects.first()
 
 # ─── SCHEMAS ─────────────────────────────────────────────────────────────────
 
@@ -223,7 +261,57 @@ class UserCreateIn(Schema):
     username: str
     password: str
     email: str = ''
-    role: Literal['admin', 'accountant', 'operations', 'viewer', 'mechanic'] = 'operations'
+    role: str = 'staff'
+    name: Optional[str] = ''
+    phone: Optional[str] = ''
+    designation: Optional[str] = 'Operations Staff'
+    department: Optional[str] = 'Operations'
+    employee_id: Optional[str] = ''
+    status: Optional[str] = 'Active'
+    is_main_admin: Optional[bool] = False
+    initial_modules: Optional[List[str]] = None
+
+class UserProfileUpdateIn(Schema):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    role: Optional[str] = None
+    phone: Optional[str] = None
+    designation: Optional[str] = None
+    department: Optional[str] = None
+    employee_id: Optional[str] = None
+    status: Optional[str] = None
+    is_main_admin: Optional[bool] = None
+
+class UserPasswordResetIn(Schema):
+    new_password: str
+
+class ModuleActionItemIn(Schema):
+    can_view: bool = False
+    can_create: bool = False
+    can_edit: bool = False
+    can_delete: bool = False
+    can_export: bool = False
+    can_approve: bool = False
+
+class UserPermissionsUpdateIn(Schema):
+    modules: Dict[str, ModuleActionItemIn]
+
+class AccessRequestCreateIn(Schema):
+    module: str
+    can_view: bool = True
+    can_create: bool = False
+    can_edit: bool = False
+    can_delete: bool = False
+    reason: str
+
+class AccessRequestApproveIn(Schema):
+    can_view: Optional[bool] = None
+    can_create: Optional[bool] = None
+    can_edit: Optional[bool] = None
+    can_delete: Optional[bool] = None
+
+class AccessRequestRejectIn(Schema):
+    rejection_reason: str = ''
 
 class InvoiceItemIn(Schema):
     description: str
@@ -1891,66 +1979,635 @@ def update_company_settings(request, org_id: int, payload: CompanyProfileIn):
     profile.save()
     return {'success': True, 'companyName': profile.company_name}
 
+# ─── MODULE 15: RBAC & USER MANAGEMENT ────────────────────────────────────────
+
 @router.get('/orgs/{org_id}/tasin-settings/users', auth=None)
 def list_system_users(request, org_id: int):
     org = _get_org(request, org_id)
     User = get_user_model()
     memberships = Membership.objects.filter(organization=org).select_related('user')
-    out = []
+    users_list = []
+    seen_ids = set()
+
     for m in memberships:
-        out.append({
-            'id': str(m.user.pk),
-            'name': m.user.get_full_name() or m.user.username,
-            'username': m.user.username,
-            'email': m.user.email,
+        u = m.user
+        seen_ids.add(u.pk)
+        profile, _ = UserProfile.objects.get_or_create(
+            user=u,
+            defaults={
+                'organization': org,
+                'designation': 'Administrator' if u.is_superuser else 'Operations Staff',
+                'department': 'Executive' if u.is_superuser else 'Operations',
+                'status': 'Active' if u.is_active else 'Inactive',
+                'is_main_admin': (m.role == 'admin' and not u.is_superuser)
+            }
+        )
+        mod_count = len(ALL_MODULE_KEYS) if u.is_superuser else UserModulePermission.objects.filter(organization=org, user=u, can_view=True).count()
+
+        users_list.append({
+            'id': str(u.pk),
+            'username': u.username,
+            'name': u.get_full_name() or u.username,
+            'email': u.email,
             'role': m.role,
-            'isActive': m.user.is_active,
-            'dateJoined': m.user.date_joined.isoformat() if hasattr(m.user, 'date_joined') and m.user.date_joined else ''
+            'isSuperAdmin': bool(u.is_superuser),
+            'isMainAdmin': bool(profile.is_main_admin),
+            'isActive': u.is_active,
+            'phone': profile.phone,
+            'designation': profile.designation,
+            'department': profile.department,
+            'employeeId': profile.employee_id,
+            'status': profile.status,
+            'canManageUsers': bool(profile.can_manage_users or u.is_superuser or profile.is_main_admin),
+            'canApproveRequests': bool(profile.can_approve_requests or u.is_superuser or profile.is_main_admin),
+            'modulesCount': mod_count,
+            'dateJoined': u.date_joined.isoformat() if hasattr(u, 'date_joined') and u.date_joined else ''
         })
-    if not out:
-        # Fallback to superusers/all users if no membership records
-        for u in User.objects.all()[:10]:
-            out.append({
-                'id': str(u.pk),
-                'name': u.get_full_name() or u.username,
-                'username': u.username,
-                'email': u.email,
-                'role': 'admin' if u.is_superuser else 'operations',
-                'isActive': u.is_active,
-                'dateJoined': u.date_joined.isoformat() if hasattr(u, 'date_joined') and u.date_joined else ''
-            })
-    return out
+
+    # Include superusers/staff not in membership yet
+    for u in User.objects.all():
+        if u.pk in seen_ids:
+            continue
+        profile, _ = UserProfile.objects.get_or_create(
+            user=u,
+            defaults={
+                'organization': org,
+                'designation': 'Super Administrator' if u.is_superuser else 'Operations Staff',
+                'department': 'Executive' if u.is_superuser else 'Operations',
+                'status': 'Active' if u.is_active else 'Inactive',
+            }
+        )
+        mod_count = len(ALL_MODULE_KEYS) if u.is_superuser else UserModulePermission.objects.filter(organization=org, user=u, can_view=True).count()
+        users_list.append({
+            'id': str(u.pk),
+            'username': u.username,
+            'name': u.get_full_name() or u.username,
+            'email': u.email,
+            'role': 'super_admin' if u.is_superuser else 'staff',
+            'isSuperAdmin': bool(u.is_superuser),
+            'isMainAdmin': bool(profile.is_main_admin),
+            'isActive': u.is_active,
+            'phone': profile.phone,
+            'designation': profile.designation,
+            'department': profile.department,
+            'employeeId': profile.employee_id,
+            'status': profile.status,
+            'canManageUsers': bool(u.is_superuser or profile.is_main_admin),
+            'canApproveRequests': bool(u.is_superuser or profile.is_main_admin),
+            'modulesCount': mod_count,
+            'dateJoined': u.date_joined.isoformat() if hasattr(u, 'date_joined') and u.date_joined else ''
+        })
+    return users_list
 
 @router.post('/orgs/{org_id}/tasin-settings/users', auth=None)
 def create_system_user(request, org_id: int, payload: UserCreateIn):
     org = _get_org(request, org_id)
+    actor = _resolve_actor(request, org)
+
+    # Authority check: Super Admin or Main Admin only
+    if not is_super_admin(actor, org) and not is_main_admin(actor, org):
+        raise ApiError(403, 'Permission denied: only Super Admin or Main Admin can add users')
+
+    # Main Admin cannot create super_admin
+    if payload.role == 'super_admin' and not is_super_admin(actor, org):
+        raise ApiError(403, 'Only Super Admin can create another Super Admin')
+
     User = get_user_model()
     if User.objects.filter(username=payload.username.strip()).exists():
         raise ApiError(409, f"User with username '{payload.username}' already exists")
+
     with transaction.atomic():
         user = User.objects.create_user(
             username=payload.username.strip(),
             email=payload.email.strip(),
             password=payload.password
         )
+        if payload.name:
+            parts = payload.name.strip().split(' ', 1)
+            user.first_name = parts[0]
+            if len(parts) > 1:
+                user.last_name = parts[1]
+            user.save()
+
+        if payload.role == 'super_admin':
+            user.is_superuser = True
+            user.is_staff = True
+            user.save()
+
         Membership.objects.create(
             organization=org,
             user=user,
             role=payload.role
         )
-    return {'id': str(user.pk), 'username': user.username, 'role': payload.role, 'success': True}
+
+        profile, _ = UserProfile.objects.get_or_create(
+            user=user,
+            defaults={
+                'organization': org,
+                'phone': payload.phone or '',
+                'designation': payload.designation or 'Operations Staff',
+                'department': payload.department or 'Operations',
+                'employee_id': payload.employee_id or f"EMP-{user.pk:04d}",
+                'status': payload.status or 'Active',
+                'is_main_admin': bool(payload.is_main_admin or payload.role == 'admin'),
+                'can_manage_users': bool(payload.is_main_admin or payload.role in ['admin', 'super_admin']),
+                'can_approve_requests': bool(payload.is_main_admin or payload.role in ['admin', 'super_admin']),
+            }
+        )
+
+        # Module Permissions Assignment
+        if payload.initial_modules:
+            for mod in payload.initial_modules:
+                if mod in ALL_MODULE_KEYS:
+                    UserModulePermission.objects.update_or_create(
+                        organization=org,
+                        user=user,
+                        module=mod,
+                        defaults={
+                            'can_view': True,
+                            'can_create': payload.role in ['super_admin', 'admin', 'accountant', 'operations_manager'],
+                            'can_edit': payload.role in ['super_admin', 'admin', 'accountant', 'operations_manager'],
+                            'can_delete': payload.role in ['super_admin', 'admin'],
+                            'can_export': True,
+                            'can_approve': payload.role in ['super_admin', 'admin'],
+                        }
+                    )
+        else:
+            base_map = DEFAULT_ROLE_MODULE_ACTIONS.get(payload.role, DEFAULT_ROLE_MODULE_ACTIONS['staff'])
+            for mod, acts in base_map.items():
+                if acts.get('view', False):
+                    UserModulePermission.objects.update_or_create(
+                        organization=org,
+                        user=user,
+                        module=mod,
+                        defaults={
+                            'can_view': acts.get('view', False),
+                            'can_create': acts.get('create', False),
+                            'can_edit': acts.get('edit', False),
+                            'can_delete': acts.get('delete', False),
+                            'can_export': acts.get('export', False),
+                            'can_approve': acts.get('approve', False),
+                        }
+                    )
+
+        AuditEvent.objects.create(
+            organization=org,
+            actor=actor if actor and actor.is_authenticated else None,
+            action='USER_CREATED',
+            target_type='User',
+            target_id=str(user.pk),
+            after={'username': user.username, 'role': payload.role, 'employee_id': profile.employee_id},
+            reason=f'User {user.username} created by {actor.username if actor else "system"}'
+        )
+
+    return {
+        'id': str(user.pk),
+        'username': user.username,
+        'name': user.get_full_name() or user.username,
+        'role': payload.role,
+        'success': True
+    }
+
+@router.put('/orgs/{org_id}/tasin-settings/users/{user_id}/profile', auth=None)
+def update_user_profile(request, org_id: int, user_id: int, payload: UserProfileUpdateIn):
+    org = _get_org(request, org_id)
+    actor = _resolve_actor(request, org)
+    User = get_user_model()
+    target_user = User.objects.filter(pk=user_id).first()
+    if not target_user:
+        raise ApiError(404, 'User not found')
+
+    if not can_admin_manage_target_user(actor, target_user, org):
+        raise ApiError(403, 'Permission denied: you cannot modify this user account')
+
+    if payload.role == 'super_admin' and not is_super_admin(actor, org):
+        raise ApiError(403, 'Only Super Admin can grant Super Admin role')
+
+    with transaction.atomic():
+        if payload.name is not None:
+            parts = payload.name.strip().split(' ', 1)
+            target_user.first_name = parts[0]
+            target_user.last_name = parts[1] if len(parts) > 1 else ''
+        if payload.email is not None:
+            target_user.email = payload.email.strip()
+        if payload.role is not None:
+            if payload.role == 'super_admin':
+                target_user.is_superuser = True
+                target_user.is_staff = True
+            elif target_user.is_superuser and is_super_admin(actor, org):
+                target_user.is_superuser = False
+            m = Membership.objects.filter(organization=org, user=target_user).first()
+            if m:
+                m.role = payload.role
+                m.save()
+            else:
+                Membership.objects.create(organization=org, user=target_user, role=payload.role)
+        target_user.save()
+
+        profile, _ = UserProfile.objects.get_or_create(user=target_user, defaults={'organization': org})
+        if payload.phone is not None:
+            profile.phone = payload.phone.strip()
+        if payload.designation is not None:
+            profile.designation = payload.designation.strip()
+        if payload.department is not None:
+            profile.department = payload.department.strip()
+        if payload.employee_id is not None:
+            profile.employee_id = payload.employee_id.strip()
+        if payload.status is not None:
+            profile.status = payload.status
+            target_user.is_active = (payload.status == 'Active')
+            target_user.save()
+        if payload.is_main_admin is not None:
+            if is_super_admin(actor, org):
+                profile.is_main_admin = payload.is_main_admin
+        profile.save()
+
+        AuditEvent.objects.create(
+            organization=org,
+            actor=actor if actor and actor.is_authenticated else None,
+            action='USER_PROFILE_UPDATED',
+            target_type='User',
+            target_id=str(target_user.pk),
+            after={'username': target_user.username, 'status': profile.status, 'designation': profile.designation},
+            reason=f'Profile updated by {actor.username if actor else "system"}'
+        )
+
+    return {'success': True, 'id': str(target_user.pk), 'username': target_user.username}
+
+@router.post('/orgs/{org_id}/tasin-settings/users/{user_id}/reset-password', auth=None)
+def reset_user_password(request, org_id: int, user_id: int, payload: UserPasswordResetIn):
+    org = _get_org(request, org_id)
+    actor = _resolve_actor(request, org)
+    User = get_user_model()
+    target_user = User.objects.filter(pk=user_id).first()
+    if not target_user:
+        raise ApiError(404, 'User not found')
+
+    if not can_admin_manage_target_user(actor, target_user, org):
+        raise ApiError(403, 'Permission denied: cannot reset password for this user')
+
+    target_user.set_password(payload.new_password)
+    target_user.save()
+
+    AuditEvent.objects.create(
+        organization=org,
+        actor=actor if actor and actor.is_authenticated else None,
+        action='USER_PASSWORD_RESET',
+        target_type='User',
+        target_id=str(target_user.pk),
+        reason=f'Password reset by {actor.username if actor else "system"}'
+    )
+
+    return {'success': True, 'id': str(target_user.pk), 'message': f'Password reset successfully for {target_user.username}'}
 
 @router.delete('/orgs/{org_id}/tasin-settings/users/{user_id}', auth=None)
 def delete_system_user(request, org_id: int, user_id: int):
     org = _get_org(request, org_id)
+    actor = _resolve_actor(request, org)
     User = get_user_model()
-    user = User.objects.filter(pk=user_id).first()
-    if not user:
+    target_user = User.objects.filter(pk=user_id).first()
+    if not target_user:
         raise ApiError(404, 'User not found')
-    Membership.objects.filter(organization=org, user=user).delete()
-    user.is_active = False
-    user.save()
+
+    if not can_admin_manage_target_user(actor, target_user, org):
+        raise ApiError(403, 'Permission denied: cannot deactivate this user')
+
+    with transaction.atomic():
+        Membership.objects.filter(organization=org, user=target_user).delete()
+        target_user.is_active = False
+        target_user.save()
+
+        profile = getattr(target_user, 'tasin_profile', None)
+        if profile:
+            profile.status = 'Inactive'
+            profile.save()
+
+        AuditEvent.objects.create(
+            organization=org,
+            actor=actor if actor and actor.is_authenticated else None,
+            action='USER_DEACTIVATED',
+            target_type='User',
+            target_id=str(target_user.pk),
+            reason=f'User deactivated by {actor.username if actor else "system"}'
+        )
+
     return {'id': str(user_id), 'success': True}
+
+# ─── DYNAMIC RBAC MATRIX PERMISSIONS ─────────────────────────────────────────
+
+@router.get('/orgs/{org_id}/tasin-settings/users/{user_id}/permissions', auth=None)
+def get_user_permissions_matrix(request, org_id: int, user_id: int):
+    org = _get_org(request, org_id)
+    actor = _resolve_actor(request, org)
+    User = get_user_model()
+    target_user = User.objects.filter(pk=user_id).first()
+    if not target_user:
+        raise ApiError(404, 'User not found')
+
+    modules_map = get_user_module_permissions_map(target_user, org)
+    role = get_user_role(target_user, org)
+    is_super = is_super_admin(target_user, org)
+    can_edit = is_super_admin(actor, org) or (is_main_admin(actor, org) and not is_super)
+
+    return {
+        'userId': str(target_user.pk),
+        'username': target_user.username,
+        'name': target_user.get_full_name() or target_user.username,
+        'role': role,
+        'isSuperAdmin': is_super,
+        'canEdit': can_edit,
+        'modules': modules_map,
+        'allModulesMeta': MODULE_REGISTRY
+    }
+
+@router.put('/orgs/{org_id}/tasin-settings/users/{user_id}/permissions', auth=None)
+def update_user_permissions_matrix(request, org_id: int, user_id: int, payload: UserPermissionsUpdateIn):
+    org = _get_org(request, org_id)
+    actor = _resolve_actor(request, org)
+    User = get_user_model()
+    target_user = User.objects.filter(pk=user_id).first()
+    if not target_user:
+        raise ApiError(404, 'User not found')
+
+    if not can_admin_manage_target_user(actor, target_user, org):
+        raise ApiError(403, 'Permission denied: cannot modify permissions of this user')
+
+    if is_super_admin(target_user, org):
+        raise ApiError(400, 'Super Admin retains full system authority; module permissions cannot be restricted')
+
+    with transaction.atomic():
+        for mod_key, acts in payload.modules.items():
+            if mod_key not in ALL_MODULE_KEYS:
+                continue
+
+            # Delegation check: Main Admin can only grant what they have
+            if is_main_admin(actor, org) and not is_super_admin(actor, org):
+                for act_name, is_set in [
+                    ('view', acts.can_view),
+                    ('create', acts.can_create),
+                    ('edit', acts.can_edit),
+                    ('delete', acts.can_delete),
+                    ('export', acts.can_export),
+                    ('approve', acts.can_approve)
+                ]:
+                    if is_set and not can_admin_grant_permission(actor, org, mod_key, act_name):
+                        raise ApiError(403, f"Main Admin delegation restriction: cannot grant '{act_name}' on '{mod_key}' as you do not possess this authority")
+
+            UserModulePermission.objects.update_or_create(
+                organization=org,
+                user=target_user,
+                module=mod_key,
+                defaults={
+                    'can_view': acts.can_view,
+                    'can_create': acts.can_create,
+                    'can_edit': acts.can_edit,
+                    'can_delete': acts.can_delete,
+                    'can_export': acts.can_export,
+                    'can_approve': acts.can_approve,
+                }
+            )
+
+        AuditEvent.objects.create(
+            organization=org,
+            actor=actor if actor and actor.is_authenticated else None,
+            action='PERMISSIONS_UPDATED',
+            target_type='User',
+            target_id=str(target_user.pk),
+            reason=f'Module permissions updated by {actor.username if actor else "system"}'
+        )
+
+    updated_map = get_user_module_permissions_map(target_user, org)
+    return {'success': True, 'userId': str(target_user.pk), 'modules': updated_map}
+
+# ─── WORKSPACE / MODULE ACCESS REQUEST SYSTEM ─────────────────────────────────
+
+@router.get('/orgs/{org_id}/access-requests', auth=None)
+def list_access_requests(request, org_id: int, status: Optional[str] = None, my_only: bool = False):
+    org = _get_org(request, org_id)
+    actor = _resolve_actor(request, org)
+
+    qs = AccessRequest.objects.filter(organization=org).select_related('user', 'reviewed_by')
+
+    # Non-admins can only see their own requests
+    if my_only or (not is_super_admin(actor, org) and not is_main_admin(actor, org)):
+        if actor and actor.is_authenticated:
+            qs = qs.filter(user=actor)
+        else:
+            qs = qs.none()
+
+    if status and status != 'All':
+        qs = qs.filter(status=status)
+
+    out = []
+    for r in qs[:100]:
+        profile = getattr(r.user, 'tasin_profile', None)
+        out.append({
+            'id': r.id,
+            'userId': str(r.user.pk),
+            'username': r.user.username,
+            'userName': r.user.get_full_name() or r.user.username,
+            'department': profile.department if profile else 'Operations',
+            'designation': profile.designation if profile else 'Staff',
+            'requestedModule': r.requested_module,
+            'canView': r.can_view,
+            'canCreate': r.can_create,
+            'canEdit': r.can_edit,
+            'canDelete': r.can_delete,
+            'canExport': r.can_export,
+            'canApprove': r.can_approve,
+            'reason': r.reason,
+            'status': r.status,
+            'reviewedBy': r.reviewed_by.get_full_name() or r.reviewed_by.username if r.reviewed_by else None,
+            'reviewedAt': r.reviewed_at.isoformat() if r.reviewed_at else None,
+            'rejectionReason': r.rejection_reason,
+            'createdAt': r.created_at.isoformat() if r.created_at else ''
+        })
+    return out
+
+@router.post('/orgs/{org_id}/access-requests', auth=None)
+def create_access_request(request, org_id: int, payload: AccessRequestCreateIn):
+    org = _get_org(request, org_id)
+    actor = _resolve_actor(request, org)
+    if not actor or not actor.is_authenticated:
+        raise ApiError(401, 'Authentication required to submit access request')
+
+    if payload.module not in ALL_MODULE_KEYS:
+        raise ApiError(400, f"Invalid module '{payload.module}'. Must be one of the 15 system modules")
+
+    existing = AccessRequest.objects.filter(
+        organization=org,
+        user=actor,
+        requested_module=payload.module,
+        status='Pending'
+    ).first()
+    if existing:
+        raise ApiError(400, f"You already have a pending access request for '{payload.module}' submitted on {existing.created_at.strftime('%Y-%m-%d')}")
+
+    req = AccessRequest.objects.create(
+        organization=org,
+        user=actor,
+        requested_module=payload.module,
+        can_view=payload.can_view,
+        can_create=payload.can_create,
+        can_edit=payload.can_edit,
+        can_delete=payload.can_delete,
+        reason=payload.reason.strip()
+    )
+
+    SystemAlert.objects.create(
+        organization=org,
+        alert_id=f"ALT-REQ-{req.id}",
+        alert_type='custom',
+        severity='info',
+        title=f"Access Request: {actor.username} -> {payload.module}",
+        detail=f"User {actor.get_full_name() or actor.username} requested access to {payload.module}. Reason: {payload.reason}",
+        date=date.today()
+    )
+
+    AuditEvent.objects.create(
+        organization=org,
+        actor=actor,
+        action='ACCESS_REQUEST_SUBMITTED',
+        target_type='AccessRequest',
+        target_id=str(req.id),
+        after={'module': payload.module, 'reason': payload.reason},
+        reason=f'Submitted access request for {payload.module}'
+    )
+
+    return {
+        'id': req.id,
+        'status': 'Pending',
+        'module': payload.module,
+        'message': f"Access request for '{payload.module}' submitted successfully and queued for administrator review.",
+        'success': True
+    }
+
+@router.post('/orgs/{org_id}/access-requests/{request_id}/approve', auth=None)
+def approve_access_request(request, org_id: int, request_id: int, payload: Optional[AccessRequestApproveIn] = None):
+    org = _get_org(request, org_id)
+    actor = _resolve_actor(request, org)
+
+    if not is_super_admin(actor, org) and not is_main_admin(actor, org):
+        raise ApiError(403, 'Permission denied: only Super Admin or Main Admin can approve requests')
+
+    req = AccessRequest.objects.filter(organization=org, pk=request_id).select_related('user').first()
+    if not req:
+        raise ApiError(404, 'Access request not found')
+
+    if req.status != 'Pending':
+        raise ApiError(400, f'Cannot approve request with status: {req.status}')
+
+    # Delegation check for Main Admin
+    if is_main_admin(actor, org) and not is_super_admin(actor, org):
+        if not can_admin_grant_permission(actor, org, req.requested_module, 'view'):
+            raise ApiError(403, f"Main Admin delegation restriction: cannot approve access to '{req.requested_module}' because you do not have permission for this module")
+
+    with transaction.atomic():
+        v = payload.can_view if payload and payload.can_view is not None else req.can_view
+        c = payload.can_create if payload and payload.can_create is not None else req.can_create
+        e = payload.can_edit if payload and payload.can_edit is not None else req.can_edit
+        d = payload.can_delete if payload and payload.can_delete is not None else req.can_delete
+
+        UserModulePermission.objects.update_or_create(
+            organization=org,
+            user=req.user,
+            module=req.requested_module,
+            defaults={
+                'can_view': v,
+                'can_create': c,
+                'can_edit': e,
+                'can_delete': d,
+                'can_export': True,
+                'can_approve': False,
+            }
+        )
+
+        req.status = 'Approved'
+        req.can_view = v
+        req.can_create = c
+        req.can_edit = e
+        req.can_delete = d
+        req.reviewed_by = actor if actor and actor.is_authenticated else None
+        req.reviewed_at = timezone.now()
+        req.save()
+
+        SystemAlert.objects.create(
+            organization=org,
+            alert_id=f"ALT-APP-{req.id}",
+            alert_type='custom',
+            severity='info',
+            title=f"Access Request Approved: {req.requested_module}",
+            detail=f"Your request for access to {req.requested_module} was approved by {actor.username if actor else 'Administrator'}.",
+            date=date.today()
+        )
+
+        AuditEvent.objects.create(
+            organization=org,
+            actor=actor if actor and actor.is_authenticated else None,
+            action='ACCESS_REQUEST_APPROVED',
+            target_type='AccessRequest',
+            target_id=str(req.id),
+            after={'status': 'Approved', 'module': req.requested_module, 'view': v, 'create': c, 'edit': e, 'delete': d},
+            reason=f'Approved access to {req.requested_module} for {req.user.username}'
+        )
+
+    return {
+        'id': req.id,
+        'status': 'Approved',
+        'module': req.requested_module,
+        'user': req.user.username,
+        'success': True
+    }
+
+@router.post('/orgs/{org_id}/access-requests/{request_id}/reject', auth=None)
+def reject_access_request(request, org_id: int, request_id: int, payload: AccessRequestRejectIn):
+    org = _get_org(request, org_id)
+    actor = _resolve_actor(request, org)
+
+    if not is_super_admin(actor, org) and not is_main_admin(actor, org):
+        raise ApiError(403, 'Permission denied: only Super Admin or Main Admin can reject requests')
+
+    req = AccessRequest.objects.filter(organization=org, pk=request_id).select_related('user').first()
+    if not req:
+        raise ApiError(404, 'Access request not found')
+
+    if req.status != 'Pending':
+        raise ApiError(400, f'Cannot reject request with status: {req.status}')
+
+    with transaction.atomic():
+        req.status = 'Rejected'
+        req.rejection_reason = payload.rejection_reason.strip() or 'Request declined by administrator'
+        req.reviewed_by = actor if actor and actor.is_authenticated else None
+        req.reviewed_at = timezone.now()
+        req.save()
+
+        SystemAlert.objects.create(
+            organization=org,
+            alert_id=f"ALT-REJ-{req.id}",
+            alert_type='custom',
+            severity='warning',
+            title=f"Access Request Declined: {req.requested_module}",
+            detail=f"Your request for {req.requested_module} was declined: {req.rejection_reason}",
+            date=date.today()
+        )
+
+        AuditEvent.objects.create(
+            organization=org,
+            actor=actor if actor and actor.is_authenticated else None,
+            action='ACCESS_REQUEST_REJECTED',
+            target_type='AccessRequest',
+            target_id=str(req.id),
+            after={'status': 'Rejected', 'reason': req.rejection_reason},
+            reason=f'Rejected access to {req.requested_module} for {req.user.username}'
+        )
+
+    return {
+        'id': req.id,
+        'status': 'Rejected',
+        'module': req.requested_module,
+        'user': req.user.username,
+        'success': True
+    }
 
 # ─── MODULE 14: ADVANCED REPORTING ENDPOINTS ──────────────────────────────────
 
@@ -1976,9 +2633,15 @@ def report_account_ledger(request, org_id: int, account_id: Optional[int] = None
 # ─── RBAC: PERMISSION VERIFICATION ENDPOINT ───────────────────────────────────
 
 @router.get('/orgs/{org_id}/rbac/permissions', auth=None)
-def get_my_permissions(request, org_id: int):
+def get_my_permissions(request, org_id: int, user_id: Optional[int] = None):
     org = _get_org(request, org_id)
-    return get_user_permissions_payload(request.user if hasattr(request, 'user') else None, org)
+    target_user = None
+    if user_id:
+        User = get_user_model()
+        target_user = User.objects.filter(pk=user_id).first()
+    if not target_user:
+        target_user = _resolve_actor(request, org)
+    return get_user_permissions_payload(target_user, org)
 
 # ─── MODULE 04: DRIVER ATTENDANCE REGISTER ────────────────────────────────────
 

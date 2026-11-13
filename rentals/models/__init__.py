@@ -18,7 +18,8 @@ from .tasin import (
     FinancialAccount, AccountTransaction, SystemAlert, CompanyProfile,
     TasinInvoice, TasinInvoiceItem, TasinInvoicePayment,
     DriverAttendance, SparePart, PartConsumption, DueFollowUp,
-    CustomReminder, TripDispatch, PrivateDocument
+    CustomReminder, TripDispatch, PrivateDocument,
+    UserProfile, UserModulePermission, AccessRequest
 )
 
 __all__ = ['uid','Organization','Branch','Membership','Party','Contact','PartyUser','Vehicle','Agreement','DriverAgreement','DriverAgreementVersion','VehicleOwnership','DriverAssignment','AgreementVersion','Period','Obligation',
@@ -27,4 +28,5 @@ __all__ = ['uid','Organization','Branch','Membership','Party','Contact','PartyUs
     'VehicleDetail','PartyDetail','Duty','Garage','MaintenanceRecord','VehiclePaper','FinancialAccount','AccountTransaction','SystemAlert','CompanyProfile',
     'TasinInvoice','TasinInvoiceItem','TasinInvoicePayment',
     'DriverAttendance','SparePart','PartConsumption','DueFollowUp',
-    'CustomReminder','TripDispatch','PrivateDocument']
+    'CustomReminder','TripDispatch','PrivateDocument',
+    'UserProfile','UserModulePermission','AccessRequest']

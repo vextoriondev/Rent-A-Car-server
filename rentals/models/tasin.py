@@ -462,5 +462,88 @@ class PrivateDocument(models.Model):
         ordering = ['-uploaded_at']
 
 
+class UserProfile(models.Model):
+    """Extended Employee Profile and Administrative Delegation (Module 01 & 15)."""
+    STATUS_CHOICES = [
+        ('Active', 'Active'),
+        ('Inactive', 'Inactive'),
+        ('Suspended', 'Suspended')
+    ]
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='tasin_profile')
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='user_profiles')
+    phone = models.CharField(max_length=40, blank=True, default='')
+    designation = models.CharField(max_length=120, blank=True, default='Operations Staff')
+    department = models.CharField(max_length=120, blank=True, default='Operations')
+    employee_id = models.CharField(max_length=40, blank=True, default='')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Active')
+    is_main_admin = models.BooleanField(default=False)
+    can_manage_users = models.BooleanField(default=False)
+    can_approve_requests = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['user__username']
+
+    def __str__(self):
+        return f"{self.user.username} - {self.designation} ({self.status})"
+
+
+class UserModulePermission(models.Model):
+    """Dynamic Module-Level and Granular Action-Level Authorization (All 15 Modules)."""
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='user_module_permissions')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='module_permissions')
+    module = models.CharField(max_length=60, db_index=True) # e.g. 'dashboard', 'vehicles', etc.
+    can_view = models.BooleanField(default=True)
+    can_create = models.BooleanField(default=False)
+    can_edit = models.BooleanField(default=False)
+    can_delete = models.BooleanField(default=False)
+    can_export = models.BooleanField(default=False)
+    can_approve = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['module']
+        constraints = [
+            models.UniqueConstraint(fields=['organization', 'user', 'module'], name='unique_org_user_module_perm')
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} | {self.module} [V:{self.can_view} C:{self.can_create} E:{self.can_edit} D:{self.can_delete}]"
+
+
+class AccessRequest(models.Model):
+    """Employee Workspace / Module Access Request & Approval Workflow."""
+    STATUS_CHOICES = [
+        ('Pending', 'Pending'),
+        ('Approved', 'Approved'),
+        ('Rejected', 'Rejected'),
+        ('Revoked', 'Revoked')
+    ]
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='access_requests')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='access_requests')
+    requested_module = models.CharField(max_length=60, db_index=True)
+    can_view = models.BooleanField(default=True)
+    can_create = models.BooleanField(default=False)
+    can_edit = models.BooleanField(default=False)
+    can_delete = models.BooleanField(default=False)
+    can_export = models.BooleanField(default=False)
+    can_approve = models.BooleanField(default=False)
+    reason = models.TextField(blank=True, default='')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending', db_index=True)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='reviewed_access_requests')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"REQ-{self.id} | {self.user.username} -> {self.requested_module} ({self.status})"
+
+
 
 
