@@ -103,8 +103,11 @@ class Duty(models.Model):
     discount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Scheduled')
+    is_invoiced = models.BooleanField(default=False)
+    invoice = models.ForeignKey('TasinInvoice', null=True, blank=True, on_delete=models.SET_NULL, related_name='duties')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
 
     class Meta:
         ordering = ['-date', '-id']
@@ -251,4 +254,60 @@ class CompanyProfile(models.Model):
     date_format = models.CharField(max_length=20, default='YYYY-MM-DD')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+class TasinInvoice(models.Model):
+    """Invoicing Engine (Module 05 & 06)."""
+    STATUS_CHOICES = [
+        ('Draft', 'Draft'), ('Sent', 'Sent'),
+        ('Partially Paid', 'Partially Paid'), ('Paid', 'Paid'),
+        ('Overdue', 'Overdue'), ('Cancelled', 'Cancelled')
+    ]
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='tasin_invoices')
+    invoice_number = models.CharField(max_length=64, db_index=True) # e.g. INV-2026-0001
+    client = models.ForeignKey(Party, on_delete=models.CASCADE, related_name='tasin_invoices')
+    client_name = models.CharField(max_length=180)
+    issue_date = models.DateField()
+    due_date = models.DateField()
+    subtotal = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    discount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    tax = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    total_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    paid_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Sent')
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-issue_date', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['organization', 'invoice_number'], name='unique_tasin_invoice_number')
+        ]
+
+    @property
+    def remaining_due(self):
+        return max(0, float(self.total_amount - self.paid_amount))
+
+class TasinInvoiceItem(models.Model):
+    """Invoice Line Items (Module 05)."""
+    invoice = models.ForeignKey(TasinInvoice, on_delete=models.CASCADE, related_name='items')
+    duty = models.ForeignKey('Duty', null=True, blank=True, on_delete=models.SET_NULL, related_name='invoice_items')
+    description = models.CharField(max_length=255)
+    quantity = models.DecimalField(max_digits=8, decimal_places=2, default=1)
+    unit_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+class TasinInvoicePayment(models.Model):
+    """Invoice Payments & Partial Payments Ledger (Module 05 & 10)."""
+    invoice = models.ForeignKey(TasinInvoice, on_delete=models.CASCADE, related_name='payments')
+    payment_id = models.CharField(max_length=64, db_index=True) # e.g. PAY-INV-001
+    date = models.DateField()
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    payment_method = models.CharField(max_length=40, default='Cash')
+    account = models.ForeignKey(FinancialAccount, null=True, blank=True, on_delete=models.SET_NULL, related_name='invoice_payments')
+    reference = models.CharField(max_length=120, blank=True, default='')
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
 

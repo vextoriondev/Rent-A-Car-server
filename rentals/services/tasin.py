@@ -5,7 +5,8 @@ from django.db.models import Sum, Count, Q
 from ..models import (
     Organization, Party, Vehicle,
     VehicleDetail, PartyDetail, Duty, Garage, MaintenanceRecord,
-    VehiclePaper, FinancialAccount, AccountTransaction, SystemAlert, CompanyProfile
+    VehiclePaper, FinancialAccount, AccountTransaction, SystemAlert, CompanyProfile,
+    TasinInvoice, TasinInvoiceItem, TasinInvoicePayment
 )
 
 D = Decimal
@@ -304,3 +305,336 @@ def generate_system_alerts(org: Organization, target_date=None):
                     date=target_date,
                     related_id=f'CLT-{c.pk:03d}'
                 )
+
+def generate_invoice_number(org: Organization) -> str:
+    """Concurrency-safe sequential invoice number generator: INV-YYYY-XXXX."""
+    current_year = date.today().year
+    prefix = f"INV-{current_year}-"
+    last_inv = TasinInvoice.objects.filter(
+        organization=org,
+        invoice_number__startswith=prefix
+    ).order_by('-invoice_number').first()
+    
+    if last_inv:
+        try:
+            last_seq = int(last_inv.invoice_number.split('-')[-1])
+            new_seq = last_seq + 1
+        except (ValueError, IndexError):
+            new_seq = TasinInvoice.objects.filter(organization=org).count() + 1
+    else:
+        new_seq = 1
+    return f"{prefix}{new_seq:04d}"
+
+def calculate_vehicle_profitability(org: Organization, start_date=None, end_date=None):
+    """
+    Module 14: Vehicle Profitability Report
+    Net Profit = Duty Income - (Maintenance + Fuel + Mobil + Driver Allowance + Owner Rent + Other Expenses)
+    """
+    vehicles = Vehicle.objects.filter(organization=org).select_related('detail')
+    records = []
+    
+    total_income = D(0)
+    total_maint = D(0)
+    total_fuel = D(0)
+    total_driver_exp = D(0)
+    total_owner_rent = D(0)
+    total_net_profit = D(0)
+    
+    for v in vehicles:
+        reg = v.registration
+        det = getattr(v, 'detail', None)
+        owner_name = v.ownerships.filter(effective_to__isnull=True).values_list('owner__name', flat=True).first() or 'Company Fleet'
+        monthly_rent = det.monthly_rent if det else D(0)
+        
+        # 1. Duty income & driver allowance from completed/running duties
+        duties_qs = Duty.objects.filter(organization=org, vehicle=v)
+        if start_date:
+            duties_qs = duties_qs.filter(date__gte=start_date)
+        if end_date:
+            duties_qs = duties_qs.filter(date__lte=end_date)
+            
+        duty_income = duties_qs.aggregate(s=Sum('total_amount'))['s'] or D(0)
+        driver_allowance = duties_qs.aggregate(s=Sum('driver_allowance'))['s'] or D(0)
+        
+        # 2. Maintenance costs
+        maint_qs = MaintenanceRecord.objects.filter(organization=org, vehicle_reg=reg)
+        if start_date:
+            maint_qs = maint_qs.filter(date__gte=start_date)
+        if end_date:
+            maint_qs = maint_qs.filter(date__lte=end_date)
+            
+        maintenance_cost = maint_qs.aggregate(s=Sum('total_cost'))['s'] or D(0)
+        
+        # 3. Fuel & other vehicle expenses from AccountTransaction
+        txn_qs = AccountTransaction.objects.filter(organization=org, vehicle_reg=reg, transaction_type='Expense')
+        if start_date:
+            txn_qs = txn_qs.filter(date__gte=start_date)
+        if end_date:
+            txn_qs = txn_qs.filter(date__lte=end_date)
+            
+        fuel_cost = txn_qs.filter(category='Fuel').aggregate(s=Sum('amount'))['s'] or D(0)
+        mobil_cost = txn_qs.filter(category__icontains='Mobil').aggregate(s=Sum('amount'))['s'] or D(0)
+        other_exp = txn_qs.exclude(category__in=['Fuel', 'Mobil', 'Maintenance']).aggregate(s=Sum('amount'))['s'] or D(0)
+        
+        total_vehicle_exp = maintenance_cost + fuel_cost + mobil_cost + driver_allowance + monthly_rent + other_exp
+        net_profit = duty_income - total_vehicle_exp
+        profit_margin = float(round((net_profit / duty_income * 100), 2)) if duty_income > 0 else 0.0
+        
+        total_income += duty_income
+        total_maint += maintenance_cost
+        total_fuel += (fuel_cost + mobil_cost)
+        total_driver_exp += driver_allowance
+        total_owner_rent += monthly_rent
+        total_net_profit += net_profit
+        
+        records.append({
+            'vehicleId': str(v.pk),
+            'vehicle_id': str(v.pk),
+            'regNo': reg,
+            'registration': reg,
+            'model': f"{det.brand if det else ''} {det.model if det else ''}".strip() or reg,
+            'owner': owner_name,
+            'owner_name': owner_name,
+            'status': det.status if det else 'Available',
+            'dutyIncome': float(duty_income),
+            'duty_income': float(duty_income),
+            'maintenanceCost': float(maintenance_cost),
+            'maintenance_cost': float(maintenance_cost),
+            'fuelCost': float(fuel_cost + mobil_cost),
+            'fuel_mobil_cost': float(fuel_cost + mobil_cost),
+            'driverExpense': float(driver_allowance),
+            'driver_allowance': float(driver_allowance),
+            'ownerRent': float(monthly_rent),
+            'owner_rent': float(monthly_rent),
+            'otherExpense': float(other_exp),
+            'totalExpense': float(total_vehicle_exp),
+            'total_expense': float(total_vehicle_exp),
+            'netProfit': float(net_profit),
+            'net_profit': float(net_profit),
+            'profitMargin': profit_margin,
+            'margin_pct': profit_margin
+        })
+        
+    summary_dict = {
+        'totalDutyIncome': float(total_income),
+        'duty_income': float(total_income),
+        'totalMaintenance': float(total_maint),
+        'maintenance_cost': float(total_maint),
+        'totalFuel': float(total_fuel),
+        'fuel_mobil_cost': float(total_fuel),
+        'totalDriverAllowance': float(total_driver_exp),
+        'driver_allowance': float(total_driver_exp),
+        'totalOwnerRent': float(total_owner_rent),
+        'owner_rent': float(total_owner_rent),
+        'total_expense': float(total_maint + total_fuel + total_driver_exp + total_owner_rent),
+        'totalNetProfit': float(total_net_profit),
+        'net_profit': float(total_net_profit),
+        'averageMargin': float(round((total_net_profit / total_income * 100), 2)) if total_income > 0 else 0.0
+    }
+    return {
+        'vehicles': records,
+        'summary': summary_dict,
+        'totals': summary_dict
+    }
+
+def get_document_expiries_report(org: Organization, status_filter=None):
+    """
+    Module 14: Document Expiry Report
+    All vehicle papers & driver licenses with remaining days and urgency status.
+    """
+    today = date.today()
+    items = []
+    
+    # 1. Vehicle papers
+    papers = VehiclePaper.objects.filter(organization=org, expiry_date__isnull=False).select_related('vehicle')
+    for p in papers:
+        days = (p.expiry_date - today).days
+        if days < 0:
+            st = 'Expired'
+            severity = 'danger'
+        elif days <= 7:
+            st = 'Expiring in 7 Days'
+            severity = 'danger'
+        elif days <= 15:
+            st = 'Expiring in 15 Days'
+            severity = 'warning'
+        elif days <= 30:
+            st = 'Expiring in 30 Days'
+            severity = 'warning'
+        else:
+            st = 'Valid'
+            severity = 'info'
+            
+        if status_filter == 'expired' and days >= 0:
+            continue
+        if status_filter == '7d' and not (0 <= days <= 7):
+            continue
+        if status_filter == '15d' and not (0 <= days <= 15):
+            continue
+        if status_filter == '30d' and not (0 <= days <= 30):
+            continue
+            
+        st_code = 'expired' if days < 0 else ('urgent_7d' if days <= 7 else ('warning_15d' if days <= 15 else ('notice_30d' if days <= 30 else 'valid')))
+        items.append({
+            'id': f'DOC-{p.pk}',
+            'docType': p.get_paper_type_display(),
+            'document_type': p.get_paper_type_display(),
+            'entityType': 'Vehicle',
+            'entity_type': 'Vehicle',
+            'entityName': p.vehicle.registration,
+            'entity_name': p.vehicle.registration,
+            'identifier': p.vehicle.registration,
+            'docNumber': p.paper_number or 'N/A',
+            'issueDate': p.issue_date.isoformat() if p.issue_date else '',
+            'expiryDate': p.expiry_date.isoformat(),
+            'expiry_date': p.expiry_date.isoformat(),
+            'daysRemaining': days,
+            'days_remaining': days,
+            'status': st_code,
+            'status_label': st,
+            'severity': severity
+        })
+        
+    # 2. Driver licenses
+    drivers = Party.objects.filter(organization=org, kind=Party.Kind.DRIVER).select_related('detail')
+    for d in drivers:
+        det = getattr(d, 'detail', None)
+        if det and det.license_expiry:
+            days = (det.license_expiry - today).days
+            if days < 0:
+                st = 'Expired'
+                severity = 'danger'
+            elif days <= 7:
+                st = 'Expiring in 7 Days'
+                severity = 'danger'
+            elif days <= 15:
+                st = 'Expiring in 15 Days'
+                severity = 'warning'
+            elif days <= 30:
+                st = 'Expiring in 30 Days'
+                severity = 'warning'
+            else:
+                st = 'Valid'
+                severity = 'info'
+                
+            if status_filter == 'expired' and days >= 0:
+                continue
+            if status_filter == '7d' and not (0 <= days <= 7):
+                continue
+            if status_filter == '15d' and not (0 <= days <= 15):
+                continue
+            if status_filter == '30d' and not (0 <= days <= 30):
+                continue
+                
+            st_code = 'expired' if days < 0 else ('urgent_7d' if days <= 7 else ('warning_15d' if days <= 15 else ('notice_30d' if days <= 30 else 'valid')))
+            items.append({
+                'id': f'DRV-LIC-{d.pk}',
+                'docType': 'Driving License',
+                'document_type': 'Driving License',
+                'entityType': 'Driver',
+                'entity_type': 'Driver',
+                'entityName': d.name,
+                'entity_name': d.name,
+                'identifier': det.license_no or d.name,
+                'docNumber': det.license_no or 'N/A',
+                'issueDate': det.joining_date.isoformat() if det.joining_date else '',
+                'expiryDate': det.license_expiry.isoformat(),
+                'expiry_date': det.license_expiry.isoformat(),
+                'daysRemaining': days,
+                'days_remaining': days,
+                'status': st_code,
+                'status_label': st,
+                'severity': severity
+            })
+            
+    items.sort(key=lambda x: x['daysRemaining'])
+    summary = {
+        'expired': sum(1 for x in items if x['days_remaining'] < 0),
+        'urgent_7d': sum(1 for x in items if 0 <= x['days_remaining'] <= 7),
+        'warning_15d': sum(1 for x in items if 7 < x['days_remaining'] <= 15),
+        'notice_30d': sum(1 for x in items if 15 < x['days_remaining'] <= 30),
+        'valid': sum(1 for x in items if x['days_remaining'] > 30),
+        'total': len(items)
+    }
+    return {
+        'documents': items,
+        'summary': summary
+    }
+
+def get_account_ledger_report(org: Organization, account_id=None, start_date=None, end_date=None):
+    """
+    Module 14: Cash & Bank Ledger Report
+    Running balance calculation across transactions.
+    """
+    accounts = FinancialAccount.objects.filter(organization=org, is_active=True)
+    if account_id:
+        accounts = accounts.filter(pk=account_id)
+        
+    txns_qs = AccountTransaction.objects.filter(organization=org)
+    if start_date:
+        txns_qs = txns_qs.filter(date__gte=start_date)
+    if end_date:
+        txns_qs = txns_qs.filter(date__lte=end_date)
+        
+    txns = list(txns_qs.order_by('date', 'id'))
+    
+    total_debit = D(0)  # Income / Receipts
+    total_credit = D(0) # Expenses / Payouts
+    ledger_rows = []
+    
+    opening_balance = sum((a.opening_balance for a in accounts), D(0))
+    running_balance = opening_balance
+    
+    for t in txns:
+        if t.transaction_type == 'Income':
+            debit = t.amount
+            credit = D(0)
+            running_balance += debit
+            total_debit += debit
+        elif t.transaction_type == 'Expense':
+            debit = D(0)
+            credit = t.amount
+            running_balance -= credit
+            total_credit += credit
+        else: # Transfer
+            debit = D(0)
+            credit = D(0)
+            
+        ledger_rows.append({
+            'id': str(t.pk),
+            'transactionId': t.transaction_id,
+            'date': t.date.isoformat(),
+            'type': t.transaction_type,
+            'category': t.category,
+            'party': t.related_person or t.vehicle_reg or 'General',
+            'description': t.description,
+            'method': t.payment_method,
+            'reference': t.reference,
+            'debit': float(debit),
+            'credit': float(credit),
+            'runningBalance': float(running_balance),
+            'balance': float(running_balance)
+        })
+        
+    first_acc = accounts.first()
+    acc_info = {
+        'id': first_acc.pk if first_acc else 0,
+        'name': first_acc.name if first_acc else 'Combined Accounts',
+        'type': first_acc.account_type if first_acc else 'All',
+        'bank_name': first_acc.bank_name if first_acc else '',
+        'account_number': first_acc.account_number if first_acc else ''
+    }
+
+    return {
+        'account': acc_info,
+        'opening_balance': float(opening_balance),
+        'openingBalance': float(opening_balance),
+        'closing_balance': float(running_balance),
+        'closingBalance': float(running_balance),
+        'total_inflow': float(total_debit),
+        'totalDebit': float(total_debit),
+        'total_outflow': float(total_credit),
+        'totalCredit': float(total_credit),
+        'transactions': ledger_rows
+    }
+

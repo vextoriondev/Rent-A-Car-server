@@ -10,9 +10,14 @@ from .errors import ApiError
 from ..models import (
     Organization, Membership, Party, Vehicle,
     VehicleDetail, PartyDetail, Duty, Garage, MaintenanceRecord,
-    VehiclePaper, FinancialAccount, AccountTransaction, SystemAlert, CompanyProfile
+    VehiclePaper, FinancialAccount, AccountTransaction, SystemAlert, CompanyProfile,
+    TasinInvoice, TasinInvoiceItem, TasinInvoicePayment
 )
-from ..services.tasin import get_dashboard_kpis, get_or_create_company_profile
+from ..services.tasin import (
+    get_dashboard_kpis, get_or_create_company_profile,
+    generate_invoice_number, calculate_vehicle_profitability,
+    get_document_expiries_report, get_account_ledger_report
+)
 
 router = Router()
 D = Decimal
@@ -211,6 +216,30 @@ class UserCreateIn(Schema):
     password: str
     email: str = ''
     role: Literal['admin', 'accountant', 'operations', 'viewer', 'mechanic'] = 'operations'
+
+class InvoiceItemIn(Schema):
+    description: str
+    quantity: Decimal = D(1)
+    unit_price: Decimal
+    duty_id: Optional[int] = None
+
+class InvoiceCreateIn(Schema):
+    client_id: int
+    issue_date: date
+    due_date: date
+    discount: Decimal = D(0)
+    tax: Decimal = D(0)
+    notes: Optional[str] = ''
+    duty_ids: list[int] = []
+    custom_items: list[InvoiceItemIn] = []
+
+class InvoicePaymentIn(Schema):
+    date: date
+    amount: Decimal
+    payment_method: str = 'Cash'
+    account_id: Optional[int] = None
+    reference: Optional[str] = ''
+    notes: Optional[str] = ''
 
 # ─── 0. SYSTEM HEALTH & CONNECTION CHECK (auth=None) ──────────────────────────
 
@@ -686,8 +715,8 @@ def list_clients(request, org_id: int):
     out = []
     for c in clients:
         det = getattr(c, 'detail', None)
-        rec = det.total_receivable_client if det else D(90000)
-        col = det.total_collected_client if det else D(60000)
+        rec = det.total_receivable_client if det else D(0)
+        col = det.total_collected_client if det else D(0)
         out.append({
             'id': str(c.pk),
             'clientId': f'CLT-{c.pk:03d}',
@@ -703,9 +732,89 @@ def list_clients(request, org_id: int):
             'status': det.status if det else 'Active',
             'totalReceivable': float(rec),
             'totalCollected': float(col),
-            'due': float(rec - col)
+            'due': float(max(D(0), rec - col))
         })
     return out
+
+@router.get('/orgs/{org_id}/tasin-clients/{client_id}/profile', auth=None)
+def get_client_profile(request, org_id: int, client_id: int):
+    org = _get_org(request, org_id)
+    c = Party.objects.filter(pk=client_id, organization=org, kind=Party.Kind.CUSTOMER).first()
+    if not c: raise ApiError(404, 'Client not found')
+    det = getattr(c, 'detail', None)
+
+    # Associated duties
+    duties = Duty.objects.filter(organization=org, client=c).order_by('-date')
+    duties_data = [{
+        'id': str(d.pk),
+        'dutyId': d.duty_id,
+        'date': d.date.isoformat(),
+        'vehicleReg': d.vehicle_reg,
+        'driverName': d.driver_name,
+        'pickup': d.pickup_location,
+        'destination': d.destination,
+        'dutyType': d.duty_type,
+        'totalAmount': float(d.total_amount),
+        'status': d.status,
+        'isInvoiced': d.is_invoiced,
+        'invoiceNumber': d.invoice.invoice_number if d.invoice else ''
+    } for d in duties]
+
+    # Associated invoices
+    invoices = TasinInvoice.objects.filter(organization=org, client=c).order_by('-issue_date')
+    invoices_data = [{
+        'id': str(inv.pk),
+        'invoiceNumber': inv.invoice_number,
+        'issueDate': inv.issue_date.isoformat(),
+        'dueDate': inv.due_date.isoformat(),
+        'subtotal': float(inv.subtotal),
+        'discount': float(inv.discount),
+        'tax': float(inv.tax),
+        'totalAmount': float(inv.total_amount),
+        'paidAmount': float(inv.paid_amount),
+        'remainingDue': float(inv.remaining_due),
+        'status': inv.status
+    } for inv in invoices]
+
+    # Payment history
+    payments = AccountTransaction.objects.filter(
+        organization=org,
+        related_person=c.name,
+        transaction_type='Income'
+    ).order_by('-date')
+    payments_data = [{
+        'id': str(p.pk),
+        'transactionId': p.transaction_id,
+        'date': p.date.isoformat(),
+        'amount': float(p.amount),
+        'method': p.payment_method,
+        'reference': p.reference,
+        'description': p.description
+    } for p in payments]
+
+    rec = det.total_receivable_client if det else D(0)
+    col = det.total_collected_client if det else D(0)
+
+    return {
+        'id': str(c.pk),
+        'clientId': f'CLT-{c.pk:03d}',
+        'name': c.name,
+        'contactPerson': det.contact_person if det else '',
+        'mobile': c.phone,
+        'email': c.email,
+        'address': det.present_address if det else '',
+        'billingAddress': det.billing_address if det else '',
+        'tradeLicense': det.trade_license if det else '',
+        'clientType': det.client_type if det else 'Company',
+        'joiningDate': det.joining_date.isoformat() if det and det.joining_date else '',
+        'status': det.status if det else 'Active',
+        'totalReceivable': float(rec),
+        'totalCollected': float(col),
+        'due': float(max(D(0), rec - col)),
+        'duties': duties_data,
+        'invoices': invoices_data,
+        'payments': payments_data
+    }
 
 @router.post('/orgs/{org_id}/tasin-clients', auth=None)
 def create_client(request, org_id: int, payload: ClientIn):
@@ -778,6 +887,226 @@ def delete_client(request, org_id: int, client_id: int):
     if not c: raise ApiError(404, 'Client not found')
     c.delete()
     return {'success': True, 'id': str(client_id)}
+
+# ─── INVOICE ENGINE ENDPOINTS (Module 05 & 06) ────────────────────────────────
+
+@router.get('/orgs/{org_id}/tasin-invoices', auth=None)
+def list_invoices(request, org_id: int, client_id: Optional[int] = None, status: Optional[str] = None):
+    org = _get_org(request, org_id)
+    qs = TasinInvoice.objects.filter(organization=org).select_related('client').prefetch_related('items', 'payments')
+    if client_id:
+        qs = qs.filter(client_id=client_id)
+    if status and status != 'All':
+        qs = qs.filter(status=status)
+
+    return [{
+        'id': str(inv.pk),
+        'invoiceNumber': inv.invoice_number,
+        'clientId': str(inv.client_id),
+        'clientName': inv.client_name,
+        'issueDate': inv.issue_date.isoformat(),
+        'dueDate': inv.due_date.isoformat(),
+        'subtotal': float(inv.subtotal),
+        'discount': float(inv.discount),
+        'tax': float(inv.tax),
+        'totalAmount': float(inv.total_amount),
+        'paidAmount': float(inv.paid_amount),
+        'remainingDue': float(inv.remaining_due),
+        'status': inv.status,
+        'notes': inv.notes,
+        'itemsCount': inv.items.count(),
+        'items': [{
+            'id': str(it.pk),
+            'description': it.description,
+            'quantity': float(it.quantity),
+            'unitPrice': float(it.unit_price),
+            'totalPrice': float(it.total_price),
+            'dutyId': str(it.duty_id) if it.duty_id else ''
+        } for it in inv.items.all()]
+    } for inv in qs]
+
+@router.post('/orgs/{org_id}/tasin-invoices', auth=None)
+def create_invoice(request, org_id: int, payload: InvoiceCreateIn):
+    org = _get_org(request, org_id)
+    client = Party.objects.filter(pk=payload.client_id, organization=org, kind=Party.Kind.CUSTOMER).first()
+    if not client: raise ApiError(404, 'Client not found')
+
+    with transaction.atomic():
+        invoice_num = generate_invoice_number(org)
+        inv = TasinInvoice.objects.create(
+            organization=org,
+            invoice_number=invoice_num,
+            client=client,
+            client_name=client.name,
+            issue_date=payload.issue_date,
+            due_date=payload.due_date,
+            discount=payload.discount,
+            tax=payload.tax,
+            notes=payload.notes or '',
+            status='Sent'
+        )
+
+        subtotal = D(0)
+        # 1. Attach duties
+        if payload.duty_ids:
+            duties = Duty.objects.filter(pk__in=payload.duty_ids, organization=org, is_invoiced=False)
+            for d in duties:
+                item_total = d.total_amount
+                subtotal += item_total
+                TasinInvoiceItem.objects.create(
+                    invoice=inv,
+                    duty=d,
+                    description=f"Trip on {d.date}: {d.vehicle_reg} ({d.pickup_location} → {d.destination})",
+                    quantity=D(1),
+                    unit_price=item_total,
+                    total_price=item_total
+                )
+                d.is_invoiced = True
+                d.invoice = inv
+                d.save()
+
+        # 2. Attach custom items
+        if payload.custom_items:
+            for ci in payload.custom_items:
+                tot = ci.quantity * ci.unit_price
+                subtotal += tot
+                TasinInvoiceItem.objects.create(
+                    invoice=inv,
+                    description=ci.description,
+                    quantity=ci.quantity,
+                    unit_price=ci.unit_price,
+                    total_price=tot
+                )
+
+        inv.subtotal = subtotal
+        inv.total_amount = max(D(0), subtotal - payload.discount + payload.tax)
+        inv.save()
+
+        # Update client receivable
+        det, _ = PartyDetail.objects.get_or_create(party=client)
+        det.total_receivable_client += inv.total_amount
+        det.save()
+
+    return {
+        'id': str(inv.pk),
+        'invoiceNumber': inv.invoice_number,
+        'totalAmount': float(inv.total_amount),
+        'status': inv.status,
+        'success': True
+    }
+
+@router.get('/orgs/{org_id}/tasin-invoices/{invoice_id}', auth=None)
+def get_invoice(request, org_id: int, invoice_id: int):
+    org = _get_org(request, org_id)
+    inv = TasinInvoice.objects.filter(pk=invoice_id, organization=org).select_related('client').prefetch_related('items', 'payments').first()
+    if not inv: raise ApiError(404, 'Invoice not found')
+
+    return {
+        'id': str(inv.pk),
+        'invoiceNumber': inv.invoice_number,
+        'clientId': str(inv.client_id),
+        'clientName': inv.client_name,
+        'issueDate': inv.issue_date.isoformat(),
+        'dueDate': inv.due_date.isoformat(),
+        'subtotal': float(inv.subtotal),
+        'discount': float(inv.discount),
+        'tax': float(inv.tax),
+        'totalAmount': float(inv.total_amount),
+        'paidAmount': float(inv.paid_amount),
+        'remainingDue': float(inv.remaining_due),
+        'status': inv.status,
+        'notes': inv.notes,
+        'items': [{
+            'id': str(it.pk),
+            'description': it.description,
+            'quantity': float(it.quantity),
+            'unitPrice': float(it.unit_price),
+            'totalPrice': float(it.total_price),
+            'dutyId': str(it.duty_id) if it.duty_id else ''
+        } for it in inv.items.all()],
+        'payments': [{
+            'id': str(p.pk),
+            'paymentId': p.payment_id,
+            'date': p.date.isoformat(),
+            'amount': float(p.amount),
+            'method': p.payment_method,
+            'reference': p.reference,
+            'notes': p.notes
+        } for p in inv.payments.all()]
+    }
+
+@router.post('/orgs/{org_id}/tasin-invoices/{invoice_id}/payments', auth=None)
+def record_invoice_payment(request, org_id: int, invoice_id: int, payload: InvoicePaymentIn):
+    org = _get_org(request, org_id)
+    with transaction.atomic():
+        inv = TasinInvoice.objects.select_for_update().filter(pk=invoice_id, organization=org).first()
+        if not inv: raise ApiError(404, 'Invoice not found')
+
+        rem = inv.total_amount - inv.paid_amount
+        if payload.amount <= 0:
+            raise ApiError(422, 'Payment amount must be greater than zero')
+        if payload.amount > rem:
+            raise ApiError(422, f'Payment amount (৳{payload.amount}) exceeds remaining due (৳{rem})')
+
+        p_count = inv.payments.count() + 1
+        pay_id = f"PAY-{inv.invoice_number}-{p_count:02d}"
+
+        account = None
+        if payload.account_id:
+            account = FinancialAccount.objects.select_for_update().filter(pk=payload.account_id, organization=org).first()
+        if not account:
+            account = FinancialAccount.objects.select_for_update().filter(organization=org, is_active=True).first()
+
+        if account:
+            account.current_balance += payload.amount
+            account.save()
+
+        p = TasinInvoicePayment.objects.create(
+            invoice=inv,
+            payment_id=pay_id,
+            date=payload.date,
+            amount=payload.amount,
+            payment_method=payload.payment_method,
+            account=account,
+            reference=payload.reference or '',
+            notes=payload.notes or ''
+        )
+
+        inv.paid_amount += payload.amount
+        if inv.paid_amount >= inv.total_amount:
+            inv.status = 'Paid'
+        else:
+            inv.status = 'Partially Paid'
+        inv.save()
+
+        # Update client collections
+        det, _ = PartyDetail.objects.get_or_create(party=inv.client)
+        det.total_collected_client += payload.amount
+        det.save()
+
+        # Record transaction in accounts ledger
+        AccountTransaction.objects.create(
+            organization=org,
+            transaction_id=f"TXN-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            date=payload.date,
+            transaction_type='Income',
+            category='Customer Collection',
+            related_person=inv.client_name,
+            amount=payload.amount,
+            payment_method=payload.payment_method,
+            reference=payload.reference or inv.invoice_number,
+            description=f"Invoice Payment for {inv.invoice_number}: {payload.notes or 'Settlement'}",
+            to_account=account
+        )
+
+    return {
+        'success': True,
+        'invoiceNumber': inv.invoice_number,
+        'amountPaid': float(payload.amount),
+        'paidAmount': float(inv.paid_amount),
+        'remainingDue': float(inv.remaining_due),
+        'status': inv.status
+    }
 
 # ─── MODULE 06: DAILY OPERATIONS / DUTY MANAGEMENT ───────────────────────────
 
@@ -1222,9 +1551,9 @@ def due_collection_summary(request, org_id: int):
     client_dues = []
     for c in clients:
         det = getattr(c, 'detail', None)
-        rec = det.total_receivable_client if det else D(100000)
-        col = det.total_collected_client if det else D(70000)
-        rem = rec - col
+        rec = det.total_receivable_client if det else D(0)
+        col = det.total_collected_client if det else D(0)
+        rem = max(D(0), rec - col)
         client_dues.append({
             'id': str(c.pk),
             'name': c.name,
@@ -1242,9 +1571,9 @@ def due_collection_summary(request, org_id: int):
     owner_dues = []
     for o in owners:
         det = getattr(o, 'detail', None)
-        pay = det.total_payable_owner if det else D(120000)
-        paid = det.total_paid_owner if det else D(70000)
-        rem = pay - paid
+        pay = det.total_payable_owner if det else D(0)
+        paid = det.total_paid_owner if det else D(0)
+        rem = max(D(0), pay - paid)
         owner_dues.append({
             'id': str(o.pk),
             'name': o.name,
@@ -1260,11 +1589,11 @@ def due_collection_summary(request, org_id: int):
     driver_dues = []
     for d in drivers:
         det = getattr(d, 'detail', None)
-        sal = det.monthly_salary if det else D(20000)
-        allow = det.daily_allowance if det else D(300)
+        sal = det.monthly_salary if det else D(0)
+        allow = det.daily_allowance if det else D(0)
         adv = det.advance if det else D(0)
-        paid = det.total_paid_driver if det else D(15000)
-        rem = sal - paid + adv
+        paid = det.total_paid_driver if det else D(0)
+        rem = max(D(0), sal - paid + adv)
         driver_dues.append({
             'id': str(d.pk),
             'name': d.name,
@@ -1281,7 +1610,7 @@ def due_collection_summary(request, org_id: int):
     garages = Garage.objects.filter(organization=org)
     garage_dues = []
     for g in garages:
-        rem = g.total_bill - g.total_paid
+        rem = max(D(0), g.total_bill - g.total_paid)
         garage_dues.append({
             'id': str(g.pk),
             'name': g.name,
@@ -1535,3 +1864,25 @@ def delete_system_user(request, org_id: int, user_id: int):
     user.is_active = False
     user.save()
     return {'id': str(user_id), 'success': True}
+
+# ─── MODULE 14: ADVANCED REPORTING ENDPOINTS ──────────────────────────────────
+
+@router.get('/orgs/{org_id}/tasin-reports/vehicle-profitability', auth=None)
+def report_vehicle_profitability(request, org_id: int, start_date: Optional[str] = None, end_date: Optional[str] = None):
+    org = _get_org(request, org_id)
+    sd = datetime.strptime(start_date, '%Y-%m-%d').date() if start_date else None
+    ed = datetime.strptime(end_date, '%Y-%m-%d').date() if end_date else None
+    return calculate_vehicle_profitability(org, sd, ed)
+
+@router.get('/orgs/{org_id}/tasin-reports/document-expiries', auth=None)
+def report_document_expiries(request, org_id: int, filter: Optional[str] = None):
+    org = _get_org(request, org_id)
+    return get_document_expiries_report(org, filter)
+
+@router.get('/orgs/{org_id}/tasin-reports/account-ledger', auth=None)
+def report_account_ledger(request, org_id: int, account_id: Optional[int] = None, start_date: Optional[str] = None, end_date: Optional[str] = None):
+    org = _get_org(request, org_id)
+    sd = datetime.strptime(start_date, '%Y-%m-%d').date() if start_date else None
+    ed = datetime.strptime(end_date, '%Y-%m-%d').date() if end_date else None
+    return get_account_ledger_report(org, account_id, sd, ed)
+
