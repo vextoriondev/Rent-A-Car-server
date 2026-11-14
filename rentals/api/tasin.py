@@ -257,6 +257,14 @@ class CompanyProfileIn(Schema):
     currency: str = 'BDT'
     timezone: str = 'Asia/Dhaka'
 
+class ModuleActionItemIn(Schema):
+    can_view: bool = False
+    can_create: bool = False
+    can_edit: bool = False
+    can_delete: bool = False
+    can_export: bool = False
+    can_approve: bool = False
+
 class UserCreateIn(Schema):
     username: str
     password: str
@@ -270,6 +278,7 @@ class UserCreateIn(Schema):
     status: Optional[str] = 'Active'
     is_main_admin: Optional[bool] = False
     initial_modules: Optional[List[str]] = None
+    module_permissions: Optional[Dict[str, ModuleActionItemIn]] = None
 
 class UserProfileUpdateIn(Schema):
     name: Optional[str] = None
@@ -281,17 +290,10 @@ class UserProfileUpdateIn(Schema):
     employee_id: Optional[str] = None
     status: Optional[str] = None
     is_main_admin: Optional[bool] = None
+    module_permissions: Optional[Dict[str, ModuleActionItemIn]] = None
 
 class UserPasswordResetIn(Schema):
     new_password: str
-
-class ModuleActionItemIn(Schema):
-    can_view: bool = False
-    can_create: bool = False
-    can_edit: bool = False
-    can_delete: bool = False
-    can_export: bool = False
-    can_approve: bool = False
 
 class UserPermissionsUpdateIn(Schema):
     modules: Dict[str, ModuleActionItemIn]
@@ -302,13 +304,19 @@ class AccessRequestCreateIn(Schema):
     can_create: bool = False
     can_edit: bool = False
     can_delete: bool = False
+    can_export: bool = False
+    can_approve: bool = False
     reason: str
+    user_id: Optional[int] = None
+    username: Optional[str] = None
 
 class AccessRequestApproveIn(Schema):
     can_view: Optional[bool] = None
     can_create: Optional[bool] = None
     can_edit: Optional[bool] = None
     can_delete: Optional[bool] = None
+    can_export: Optional[bool] = None
+    can_approve: Optional[bool] = None
 
 class AccessRequestRejectIn(Schema):
     rejection_reason: str = ''
@@ -2116,7 +2124,39 @@ def create_system_user(request, org_id: int, payload: UserCreateIn):
         )
 
         # Module Permissions Assignment
-        if payload.initial_modules:
+        # 1. Priority: Full Granular Module Permissions Matrix across all 15 modules
+        if payload.module_permissions:
+            for mod in ALL_MODULE_KEYS:
+                acts = payload.module_permissions.get(mod)
+                v = acts.can_view if acts else False
+                c = acts.can_create if acts else False
+                e = acts.can_edit if acts else False
+                d = acts.can_delete if acts else False
+                exp = acts.can_export if acts else False
+                appr = acts.can_approve if acts else False
+
+                if v and is_main_admin(actor, org) and not is_super_admin(actor, org):
+                    for act_name, is_set in [
+                        ('view', v), ('create', c), ('edit', e), ('delete', d), ('export', exp), ('approve', appr)
+                    ]:
+                        if is_set and not can_admin_grant_permission(actor, org, mod, act_name):
+                            raise ApiError(403, f"Main Admin delegation restriction: cannot grant '{act_name}' on '{mod}' as you do not possess this authority")
+
+                UserModulePermission.objects.update_or_create(
+                    organization=org,
+                    user=user,
+                    module=mod,
+                    defaults={
+                        'can_view': v,
+                        'can_create': c,
+                        'can_edit': e,
+                        'can_delete': d,
+                        'can_export': exp,
+                        'can_approve': appr,
+                    }
+                )
+        elif payload.initial_modules is not None:
+            # Explicit list of module keys passed
             for mod in payload.initial_modules:
                 if mod in ALL_MODULE_KEYS:
                     UserModulePermission.objects.update_or_create(
@@ -2133,6 +2173,7 @@ def create_system_user(request, org_id: int, payload: UserCreateIn):
                         }
                     )
         else:
+            # Fallback to default role baseline only if neither was provided
             base_map = DEFAULT_ROLE_MODULE_ACTIONS.get(payload.role, DEFAULT_ROLE_MODULE_ACTIONS['staff'])
             for mod, acts in base_map.items():
                 if acts.get('view', False):
@@ -2221,6 +2262,38 @@ def update_user_profile(request, org_id: int, user_id: int, payload: UserProfile
             if is_super_admin(actor, org):
                 profile.is_main_admin = payload.is_main_admin
         profile.save()
+
+        # Update module permissions atomically if provided in edit profile payload
+        if payload.module_permissions is not None:
+            for mod in ALL_MODULE_KEYS:
+                acts = payload.module_permissions.get(mod)
+                v = acts.can_view if acts else False
+                c = acts.can_create if acts else False
+                e = acts.can_edit if acts else False
+                d = acts.can_delete if acts else False
+                exp = acts.can_export if acts else False
+                appr = acts.can_approve if acts else False
+
+                if v and is_main_admin(actor, org) and not is_super_admin(actor, org):
+                    for act_name, is_set in [
+                        ('view', v), ('create', c), ('edit', e), ('delete', d), ('export', exp), ('approve', appr)
+                    ]:
+                        if is_set and not can_admin_grant_permission(actor, org, mod, act_name):
+                            raise ApiError(403, f"Main Admin delegation restriction: cannot grant '{act_name}' on '{mod}' as you do not possess this authority")
+
+                UserModulePermission.objects.update_or_create(
+                    organization=org,
+                    user=target_user,
+                    module=mod,
+                    defaults={
+                        'can_view': v,
+                        'can_create': c,
+                        'can_edit': e,
+                        'can_delete': d,
+                        'can_export': exp,
+                        'can_approve': appr,
+                    }
+                )
 
         AuditEvent.objects.create(
             organization=org,
@@ -2382,16 +2455,22 @@ def update_user_permissions_matrix(request, org_id: int, user_id: int, payload: 
 # ─── WORKSPACE / MODULE ACCESS REQUEST SYSTEM ─────────────────────────────────
 
 @router.get('/orgs/{org_id}/access-requests', auth=None)
-def list_access_requests(request, org_id: int, status: Optional[str] = None, my_only: bool = False):
+def list_access_requests(request, org_id: int, status: Optional[str] = None, my_only: bool = False, user_id: Optional[int] = None):
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
 
-    qs = AccessRequest.objects.filter(organization=org).select_related('user', 'reviewed_by')
+    qs = AccessRequest.objects.filter(organization=org).select_related('user', 'reviewed_by').order_by('-created_at')
 
-    # Non-admins can only see their own requests
+    # Non-admins can only see their own requests; admins see all organization requests
     if my_only or (not is_super_admin(actor, org) and not is_main_admin(actor, org)):
-        if actor and actor.is_authenticated:
-            qs = qs.filter(user=actor)
+        target_u = None
+        if user_id:
+            User = get_user_model()
+            target_u = User.objects.filter(pk=user_id).first()
+        if not target_u and actor and actor.is_authenticated:
+            target_u = actor
+        if target_u:
+            qs = qs.filter(user=target_u)
         else:
             qs = qs.none()
 
@@ -2399,7 +2478,7 @@ def list_access_requests(request, org_id: int, status: Optional[str] = None, my_
         qs = qs.filter(status=status)
 
     out = []
-    for r in qs[:100]:
+    for r in qs[:200]:
         profile = getattr(r.user, 'tasin_profile', None)
         out.append({
             'id': r.id,
@@ -2408,6 +2487,7 @@ def list_access_requests(request, org_id: int, status: Optional[str] = None, my_
             'userName': r.user.get_full_name() or r.user.username,
             'department': profile.department if profile else 'Operations',
             'designation': profile.designation if profile else 'Staff',
+            'employeeId': profile.employee_id if profile else '',
             'requestedModule': r.requested_module,
             'canView': r.can_view,
             'canCreate': r.can_create,
@@ -2424,11 +2504,102 @@ def list_access_requests(request, org_id: int, status: Optional[str] = None, my_
         })
     return out
 
+@router.get('/orgs/{org_id}/access-requests/summary', auth=None)
+def get_access_requests_summary(request, org_id: int):
+    org = _get_org(request, org_id)
+    qs = AccessRequest.objects.filter(organization=org)
+    return {
+        'total': qs.count(),
+        'pending': qs.filter(status='Pending').count(),
+        'approved': qs.filter(status='Approved').count(),
+        'rejected': qs.filter(status='Rejected').count(),
+    }
+
+@router.get('/orgs/{org_id}/access-requests/{request_id}/review', auth=None)
+def get_access_request_review_details(request, org_id: int, request_id: int):
+    org = _get_org(request, org_id)
+    actor = _resolve_actor(request, org)
+    if not is_super_admin(actor, org) and not is_main_admin(actor, org):
+        raise ApiError(403, 'Permission denied: only administrators can review access requests')
+
+    req = AccessRequest.objects.filter(organization=org, pk=request_id).select_related('user', 'reviewed_by').first()
+    if not req:
+        raise ApiError(404, 'Access request not found')
+
+    user = req.user
+    profile = getattr(user, 'tasin_profile', None)
+
+    # Current module permission for the requested module
+    curr_mod_perm = UserModulePermission.objects.filter(organization=org, user=user, module=req.requested_module).first()
+    curr_mod_dict = {
+        'can_view': curr_mod_perm.can_view if curr_mod_perm else False,
+        'can_create': curr_mod_perm.can_create if curr_mod_perm else False,
+        'can_edit': curr_mod_perm.can_edit if curr_mod_perm else False,
+        'can_delete': curr_mod_perm.can_delete if curr_mod_perm else False,
+        'can_export': curr_mod_perm.can_export if curr_mod_perm else False,
+        'can_approve': curr_mod_perm.can_approve if curr_mod_perm else False,
+    }
+
+    # All granted modules for this user
+    granted_modules = list(UserModulePermission.objects.filter(
+        organization=org, user=user, can_view=True
+    ).values_list('module', flat=True))
+
+    # Past requests history for this user
+    past_requests = []
+    for pr in AccessRequest.objects.filter(organization=org, user=user).exclude(pk=req.pk).order_by('-created_at')[:5]:
+        past_requests.append({
+            'id': pr.id,
+            'module': pr.requested_module,
+            'status': pr.status,
+            'reason': pr.reason,
+            'createdAt': pr.created_at.isoformat() if pr.created_at else '',
+            'reviewedBy': pr.reviewed_by.username if pr.reviewed_by else None,
+            'rejectionReason': pr.rejection_reason
+        })
+
+    return {
+        'id': req.id,
+        'userId': str(user.pk),
+        'username': user.username,
+        'name': user.get_full_name() or user.username,
+        'email': user.email,
+        'phone': profile.phone if profile else '',
+        'designation': profile.designation if profile else 'Staff',
+        'department': profile.department if profile else 'Operations',
+        'employeeId': profile.employee_id if profile else '',
+        'requestedModule': req.requested_module,
+        'canView': req.can_view,
+        'canCreate': req.can_create,
+        'canEdit': req.can_edit,
+        'canDelete': req.can_delete,
+        'canExport': req.can_export,
+        'canApprove': req.can_approve,
+        'reason': req.reason,
+        'status': req.status,
+        'createdAt': req.created_at.isoformat() if req.created_at else '',
+        'reviewedBy': req.reviewed_by.get_full_name() or req.reviewed_by.username if req.reviewed_by else None,
+        'reviewedAt': req.reviewed_at.isoformat() if req.reviewed_at else None,
+        'rejectionReason': req.rejection_reason,
+        'currentModulePermissions': curr_mod_dict,
+        'currentGrantedModules': granted_modules,
+        'pastRequests': past_requests
+    }
+
 @router.post('/orgs/{org_id}/access-requests', auth=None)
 def create_access_request(request, org_id: int, payload: AccessRequestCreateIn):
     org = _get_org(request, org_id)
-    actor = _resolve_actor(request, org)
-    if not actor or not actor.is_authenticated:
+    User = get_user_model()
+    target_user = None
+
+    if payload.user_id:
+        target_user = User.objects.filter(pk=payload.user_id).first()
+    elif payload.username:
+        target_user = User.objects.filter(username=payload.username.strip()).first()
+    if not target_user:
+        target_user = _resolve_actor(request, org)
+
+    if not target_user:
         raise ApiError(401, 'Authentication required to submit access request')
 
     if payload.module not in ALL_MODULE_KEYS:
@@ -2436,7 +2607,7 @@ def create_access_request(request, org_id: int, payload: AccessRequestCreateIn):
 
     existing = AccessRequest.objects.filter(
         organization=org,
-        user=actor,
+        user=target_user,
         requested_module=payload.module,
         status='Pending'
     ).first()
@@ -2445,12 +2616,14 @@ def create_access_request(request, org_id: int, payload: AccessRequestCreateIn):
 
     req = AccessRequest.objects.create(
         organization=org,
-        user=actor,
+        user=target_user,
         requested_module=payload.module,
         can_view=payload.can_view,
         can_create=payload.can_create,
         can_edit=payload.can_edit,
         can_delete=payload.can_delete,
+        can_export=payload.can_export,
+        can_approve=payload.can_approve,
         reason=payload.reason.strip()
     )
 
@@ -2459,14 +2632,14 @@ def create_access_request(request, org_id: int, payload: AccessRequestCreateIn):
         alert_id=f"ALT-REQ-{req.id}",
         alert_type='custom',
         severity='info',
-        title=f"Access Request: {actor.username} -> {payload.module}",
-        detail=f"User {actor.get_full_name() or actor.username} requested access to {payload.module}. Reason: {payload.reason}",
+        title=f"Access Request: {target_user.username} -> {payload.module}",
+        detail=f"User {target_user.get_full_name() or target_user.username} requested access to {payload.module}. Reason: {payload.reason}",
         date=date.today()
     )
 
     AuditEvent.objects.create(
         organization=org,
-        actor=actor,
+        actor=target_user if target_user.is_authenticated else None,
         action='ACCESS_REQUEST_SUBMITTED',
         target_type='AccessRequest',
         target_id=str(req.id),
@@ -2490,23 +2663,27 @@ def approve_access_request(request, org_id: int, request_id: int, payload: Optio
     if not is_super_admin(actor, org) and not is_main_admin(actor, org):
         raise ApiError(403, 'Permission denied: only Super Admin or Main Admin can approve requests')
 
-    req = AccessRequest.objects.filter(organization=org, pk=request_id).select_related('user').first()
-    if not req:
-        raise ApiError(404, 'Access request not found')
-
-    if req.status != 'Pending':
-        raise ApiError(400, f'Cannot approve request with status: {req.status}')
-
-    # Delegation check for Main Admin
-    if is_main_admin(actor, org) and not is_super_admin(actor, org):
-        if not can_admin_grant_permission(actor, org, req.requested_module, 'view'):
-            raise ApiError(403, f"Main Admin delegation restriction: cannot approve access to '{req.requested_module}' because you do not have permission for this module")
-
     with transaction.atomic():
+        # Row lock for concurrency safety across multiple administrators
+        req = AccessRequest.objects.select_for_update().filter(organization=org, pk=request_id).first()
+        if not req:
+            raise ApiError(404, 'Access request not found')
+
+        if req.status != 'Pending':
+            reviewer_name = req.reviewed_by.username if req.reviewed_by else 'another administrator'
+            raise ApiError(400, f'Cannot approve request: request has already been processed with status {req.status} by {reviewer_name}')
+
+        # Delegation check for Main Admin
+        if is_main_admin(actor, org) and not is_super_admin(actor, org):
+            if not can_admin_grant_permission(actor, org, req.requested_module, 'view'):
+                raise ApiError(403, f"Main Admin delegation restriction: cannot approve access to '{req.requested_module}' because you do not have permission for this module")
+
         v = payload.can_view if payload and payload.can_view is not None else req.can_view
         c = payload.can_create if payload and payload.can_create is not None else req.can_create
         e = payload.can_edit if payload and payload.can_edit is not None else req.can_edit
         d = payload.can_delete if payload and payload.can_delete is not None else req.can_delete
+        exp = payload.can_export if payload and payload.can_export is not None else req.can_export
+        appr = payload.can_approve if payload and payload.can_approve is not None else req.can_approve
 
         UserModulePermission.objects.update_or_create(
             organization=org,
@@ -2517,8 +2694,8 @@ def approve_access_request(request, org_id: int, request_id: int, payload: Optio
                 'can_create': c,
                 'can_edit': e,
                 'can_delete': d,
-                'can_export': True,
-                'can_approve': False,
+                'can_export': exp,
+                'can_approve': appr,
             }
         )
 
@@ -2527,6 +2704,8 @@ def approve_access_request(request, org_id: int, request_id: int, payload: Optio
         req.can_create = c
         req.can_edit = e
         req.can_delete = d
+        req.can_export = exp
+        req.can_approve = appr
         req.reviewed_by = actor if actor and actor.is_authenticated else None
         req.reviewed_at = timezone.now()
         req.save()
@@ -2547,7 +2726,7 @@ def approve_access_request(request, org_id: int, request_id: int, payload: Optio
             action='ACCESS_REQUEST_APPROVED',
             target_type='AccessRequest',
             target_id=str(req.id),
-            after={'status': 'Approved', 'module': req.requested_module, 'view': v, 'create': c, 'edit': e, 'delete': d},
+            after={'status': 'Approved', 'module': req.requested_module, 'view': v, 'create': c, 'edit': e, 'delete': d, 'export': exp, 'approve': appr},
             reason=f'Approved access to {req.requested_module} for {req.user.username}'
         )
 
@@ -2567,14 +2746,16 @@ def reject_access_request(request, org_id: int, request_id: int, payload: Access
     if not is_super_admin(actor, org) and not is_main_admin(actor, org):
         raise ApiError(403, 'Permission denied: only Super Admin or Main Admin can reject requests')
 
-    req = AccessRequest.objects.filter(organization=org, pk=request_id).select_related('user').first()
-    if not req:
-        raise ApiError(404, 'Access request not found')
-
-    if req.status != 'Pending':
-        raise ApiError(400, f'Cannot reject request with status: {req.status}')
-
     with transaction.atomic():
+        # Row lock for concurrency safety across multiple administrators
+        req = AccessRequest.objects.select_for_update().filter(organization=org, pk=request_id).first()
+        if not req:
+            raise ApiError(404, 'Access request not found')
+
+        if req.status != 'Pending':
+            reviewer_name = req.reviewed_by.username if req.reviewed_by else 'another administrator'
+            raise ApiError(400, f'Cannot reject request: request has already been processed with status {req.status} by {reviewer_name}')
+
         req.status = 'Rejected'
         req.rejection_reason = payload.rejection_reason.strip() or 'Request declined by administrator'
         req.reviewed_by = actor if actor and actor.is_authenticated else None

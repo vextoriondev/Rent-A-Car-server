@@ -198,28 +198,32 @@ def get_user_module_permissions_map(user, org: Organization) -> Dict[str, Dict[s
             for m in ALL_MODULE_KEYS
         }
 
-    # 2. Start from default role baseline
+    # 2. Database records in UserModulePermission (explicit custom configuration)
+    if user and user.is_authenticated:
+        db_perms = list(UserModulePermission.objects.filter(organization=org, user=user))
+        if db_perms:
+            result: Dict[str, Dict[str, bool]] = {
+                m: {'view': False, 'create': False, 'edit': False, 'delete': False, 'export': False, 'approve': False}
+                for m in ALL_MODULE_KEYS
+            }
+            for p in db_perms:
+                if p.module in result:
+                    result[p.module] = {
+                        'view': p.can_view,
+                        'create': p.can_create,
+                        'edit': p.can_edit,
+                        'delete': p.can_delete,
+                        'export': p.can_export,
+                        'approve': p.can_approve,
+                    }
+            return result
+
+    # 3. Fallback to default role baseline for users with no custom DB permissions
     base_map = DEFAULT_ROLE_MODULE_ACTIONS.get(role, DEFAULT_ROLE_MODULE_ACTIONS['staff'])
-    result: Dict[str, Dict[str, bool]] = {
+    return {
         m: dict(base_map.get(m, {'view': False, 'create': False, 'edit': False, 'delete': False, 'export': False, 'approve': False}))
         for m in ALL_MODULE_KEYS
     }
-
-    # 3. Apply custom dynamic overrides from database
-    if user and user.is_authenticated:
-        db_perms = UserModulePermission.objects.filter(organization=org, user=user)
-        for p in db_perms:
-            if p.module in result:
-                result[p.module] = {
-                    'view': p.can_view,
-                    'create': p.can_create,
-                    'edit': p.can_edit,
-                    'delete': p.can_delete,
-                    'export': p.can_export,
-                    'approve': p.can_approve,
-                }
-                
-    return result
 
 def has_module_action(user, org: Organization, module: str, action: str = 'view') -> bool:
     """Checks whether user has a specific granular action permission on a module."""
