@@ -13,6 +13,7 @@ from .settlement import OrgSettings, Settlement, SettlementLine
 from .notifications import NotificationOutbox, NotificationDelivery
 from .idempotency import IdempotencyRecord
 from .preferences import UserPreference
+from .finance import PartyLedgerEntry, SalaryPayment, RentAccrual, ReplacementAssignment, TasinAgreement
 from .tasin import (
     VehicleDetail, PartyDetail, Duty, Garage, MaintenanceRecord, VehiclePaper,
     FinancialAccount, AccountTransaction, SystemAlert, CompanyProfile,
@@ -29,4 +30,5 @@ __all__ = ['uid','Organization','Branch','Membership','Party','Contact','PartyUs
     'TasinInvoice','TasinInvoiceItem','TasinInvoicePayment',
     'DriverAttendance','SparePart','PartConsumption','DueFollowUp',
     'CustomReminder','TripDispatch','PrivateDocument',
-    'UserProfile','UserModulePermission','AccessRequest']
+    'UserProfile','UserModulePermission','AccessRequest',
+    'PartyLedgerEntry','SalaryPayment','RentAccrual','ReplacementAssignment','TasinAgreement']

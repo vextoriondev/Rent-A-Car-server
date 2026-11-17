@@ -57,7 +57,8 @@ def get_dashboard_kpis(org: Organization, target_date=None, period='Monthly'):
     clients = Party.objects.filter(organization=org, kind=Party.Kind.CUSTOMER).select_related('detail')
     total_customer_receivable = sum((c.detail.total_receivable_client - c.detail.total_collected_client) for c in clients if getattr(c, 'detail', None))
     total_owner_payable = sum((o.detail.total_payable_owner - o.detail.total_paid_owner) for o in owners if getattr(o, 'detail', None))
-    total_driver_payable = sum((d.detail.monthly_salary - d.detail.total_paid_driver + d.detail.advance) for d in drivers if getattr(d, 'detail', None))
+    from .finance import driver_payable_for_dues
+    total_driver_payable = sum(max(D(0), driver_payable_for_dues(d)) for d in drivers if getattr(d, 'detail', None))
     
     garages = Garage.objects.filter(organization=org)
     total_garage_payable = sum((g.total_bill - g.total_paid) for g in garages)

@@ -57,6 +57,8 @@ def register_view(request,payload:RegisterIn):
     if not username:raise ApiError(422, 'username_is_required')
     if len(payload.password)<8:raise ApiError(422, 'password_must_be_at_least_8_characters')
     User=get_user_model()
+    from ..rbac import RESERVED_SUPER_ADMIN_USERNAMES
+    if username.lower() in RESERVED_SUPER_ADMIN_USERNAMES:raise ApiError(409, 'that_username_is_already_taken')  # these names carry Super Admin rights in rbac.is_super_admin
     if User.objects.filter(username__iexact=username).exists():raise ApiError(409, 'that_username_is_already_taken')
     with transaction.atomic():
         user=User.objects.create_user(username=username,email=payload.email.strip(),password=payload.password)

@@ -458,6 +458,8 @@ class Command(BaseCommand):
                     ip='127.0.0.1'
                 )
 
+        from rentals.services.finance import backfill_legacy_counters
+        backfill_legacy_counters()  # mirror seeded balances into the party ledger
         self.stdout.write(self.style.SUCCESS(
             f"Successfully seeded comprehensive demo dataset into '{org_name}':\n"
             f"  - Organizations: 2 (Primary + Cross-Org Isolation)\n"

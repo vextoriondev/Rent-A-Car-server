@@ -300,5 +300,7 @@ class Command(BaseCommand):
                 }
             )
 
+        from rentals.services.finance import backfill_legacy_counters
+        backfill_legacy_counters(org)  # mirror seeded balances into the party ledger
         self.stdout.write(self.style.SUCCESS(f'Successfully seeded TASIN ENTERPRISE complete data across all 15 modules! Organization ID: {org.pk}'))
 

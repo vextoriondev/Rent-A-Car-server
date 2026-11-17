@@ -43,7 +43,7 @@ class TasinApiTests(TestCase):
                 'email': 'owner@test.com', 'nid': '1234567890', 'present_address': 'Dhaka',
                 'permanent_address': 'Chittagong', 'bank_name': 'DBBL', 'account_name': 'Test Owner',
                 'account_number': '123456', 'branch_name': 'Dhanmondi', 'account_type': 'Savings',
-                'joining_date': '2026-01-01', 'status': 'Active'
+                'joining_date': '2026-01-01', 'status': 'Active', 'opening_balance': '30000', 'opening_balance_type': 'payable'
             },
             content_type='application/json'
         )
@@ -63,6 +63,10 @@ class TasinApiTests(TestCase):
         )
         self.assertEqual(r_pay.status_code, 200)
         self.assertTrue(r_pay.json()['success'])
+        self.assertEqual(r_pay.json()['remainingDue'], 5000.0)
+        # paying more than is payable is rejected
+        r_over = self.c.post(f'/api/v1/orgs/{self.org.pk}/tasin-owners/{owner_id}/payments', data={'amount': 5000.01}, content_type='application/json')
+        self.assertEqual(r_over.status_code, 422)
 
     def test_vehicle_lifecycle(self):
         r_create = self.c.post(

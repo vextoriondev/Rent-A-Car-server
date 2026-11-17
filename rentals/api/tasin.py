@@ -27,6 +27,8 @@ from ..services.tasin import (
     reconcile_bank_statement, build_custom_report,
     generate_organization_backup
 )
+from ..services import finance as fin
+from .tasin_auth import tasin_auth
 from ..rbac import (
     get_user_permissions_payload, get_user_role, check_permission,
     is_super_admin, is_main_admin, can_admin_grant_permission,
@@ -34,91 +36,38 @@ from ..rbac import (
     MODULE_REGISTRY, ALL_MODULE_KEYS, DEFAULT_ROLE_MODULE_ACTIONS
 )
 
-router = Router()
+Date = date  # schema fields named `date` shadow the type inside class bodies
+router = Router(auth=tasin_auth)
 D = Decimal
 
 def _get_org(request: HttpRequest, org_id: int | None = None) -> Organization:
-    if org_id:
+    """The organization named in the URL. Membership/RBAC were already enforced by `tasin_auth`; there is no fallback
+    to "some other organization" and nothing is created here."""
+    if org_id is not None:
         org = Organization.objects.filter(pk=org_id).first()
+        if not org:
+            raise fin.FinanceError('not_found', 'Organization not found', status=404)
+        return org
+    membership = Membership.objects.filter(user=request.user).select_related('organization').first()
+    if membership:
+        return membership.organization
+    if is_super_admin(request.user):
+        org = Organization.objects.first()
         if org:
             return org
-    # Fallback to user's first org or first organization in database
-    if getattr(request, 'user', None) and request.user.is_authenticated:
-        m = Membership.objects.filter(user=request.user).first()
-        if m:
-            return m.organization
-    org = Organization.objects.first()
-    if not org:
-        org = Organization.objects.create(name='TASIN ENTERPRISE')
-    return org
+    raise fin.FinanceError('forbidden', 'You do not belong to an organization', status=403)
 
 def _resolve_actor(request: HttpRequest, org: Organization):
-    """
-    Resolves the user executing the operation for audit logs and RBAC checks.
-    Checks request.user first; if not authenticated, checks X-User-Id or X-Username header,
-    query params, or falls back to the active superuser/admin of the organization.
-    """
+    """The signed-in user. Never taken from headers, query strings or payloads, and never defaulted to an admin."""
     user = getattr(request, 'user', None)
-    if user and user.is_authenticated:
-        return user
-    User = get_user_model()
-    if hasattr(request, 'headers'):
-        uid_hdr = request.headers.get('X-User-Id')
-        uname_hdr = request.headers.get('X-Username')
-        if uid_hdr:
-            u = User.objects.filter(pk=uid_hdr).first()
-            if u:
-                return u
-        if uname_hdr:
-            u = User.objects.filter(username__iexact=uname_hdr.strip()).first()
-            if u:
-                return u
-
-    # Check query params for reviewer identity
-    if hasattr(request, 'GET'):
-        ru = request.GET.get('reviewer_username') or request.GET.get('username')
-        if ru:
-            u = User.objects.filter(username__iexact=ru.strip()).first()
-            if u:
-                return u
-
-    # Fallback to org admin or first superuser
-    # 1. Look for user with username 'admin' or 'superadmin'
-    admin_u = User.objects.filter(username__in=['admin', 'superadmin', 'tasin_superadmin_test', 'sa_tasin_1']).first()
-    if admin_u:
-        return admin_u
-
-    # 2. Look for any active superuser
-    su = User.objects.filter(is_superuser=True).first()
-    if su:
-        return su
-
-    # 3. Super admin membership in organization
-    m_sa = Membership.objects.filter(organization=org, role__in=['super_admin', 'superadmin', 'owner']).select_related('user').first()
-    if m_sa and m_sa.user:
-        return m_sa.user
-
-    # 4. Admin membership in organization
-    m = Membership.objects.filter(organization=org, role__in=['admin', 'administrator']).select_related('user').first()
-    if m and m.user:
-        return m.user
-
-    # 5. Any administrator membership in any organization
-    m_any = Membership.objects.filter(role__in=['super_admin', 'superadmin', 'owner', 'admin', 'administrator']).select_related('user').first()
-    if m_any and m_any.user:
-        return m_any.user
-
-    # 6. Any staff user
-    staff = User.objects.filter(is_staff=True).first()
-    if staff:
-        return staff
-
-    return User.objects.first()
+    if not (user and user.is_authenticated):
+        raise fin.FinanceError('unauthorized', 'Authentication required', status=401)
+    return user
 
 # ─── SCHEMAS ─────────────────────────────────────────────────────────────────
 
 class DutyIn(Schema):
-    date: date
+    date: Date
     client_id: Optional[str] = ''
     client_name: str
     vehicle_id: Optional[str] = ''
@@ -156,8 +105,14 @@ class OwnerIn(Schema):
     account_number: str = ''
     branch_name: str = ''
     account_type: str = 'Savings'
-    joining_date: Optional[date] = None
+    joining_date: Optional[Date] = None
     status: str = 'Active'
+    opening_balance: Decimal = D(0)
+    opening_balance_type: str = 'payable'  # payable | receivable | other
+    opening_balance_direction: Optional[str] = None
+    opening_balance_date: Optional[Date] = None
+    opening_balance_description: str = ''
+    opening_balance_reference: str = ''
 
 class VehicleInCustom(Schema):
     registration: Optional[str] = ''
@@ -169,7 +124,7 @@ class VehicleInCustom(Schema):
     color: str = 'White'
     chassis_no: str = ''
     engine_no: str = ''
-    registration_date: Optional[date] = None
+    registration_date: Optional[Date] = None
     owner_id: Optional[int] = None
     driver_id: Optional[int] = None
     monthly_rent: Decimal = D(50000)
@@ -178,8 +133,8 @@ class VehicleInCustom(Schema):
 class VehiclePaperIn(Schema):
     paper_type: Literal['registration', 'fitness', 'tax_token', 'insurance', 'route_permit', 'custom']
     paper_number: str = ''
-    issue_date: Optional[date] = None
-    expiry_date: Optional[date] = None
+    issue_date: Optional[Date] = None
+    expiry_date: Optional[Date] = None
     status: str = 'Valid'
     document_url: str = ''
 
@@ -190,7 +145,7 @@ class DriverIn(Schema):
     nid: str = ''
     present_address: str = ''
     dob: Optional[date] = None
-    joining_date: Optional[date] = None
+    joining_date: Optional[Date] = None
     license_no: str = ''
     license_type: str = 'Professional'
     license_expiry: Optional[date] = None
@@ -200,6 +155,9 @@ class DriverIn(Schema):
     daily_allowance: Decimal = D(300)
     advance: Decimal = D(0)
     status: str = 'Active'
+    previous_salary_due: Decimal = D(0)
+    previous_fuel_gas_due: Decimal = D(0)
+    opening_balance_date: Optional[Date] = None
 
 class ClientIn(Schema):
     name: str
@@ -210,15 +168,21 @@ class ClientIn(Schema):
     billing_address: str = ''
     trade_license: str = ''
     client_type: Literal['Individual', 'Company', 'Government'] = 'Company'
-    joining_date: Optional[date] = None
+    joining_date: Optional[Date] = None
     status: str = 'Active'
+    opening_balance: Decimal = D(0)
+    opening_balance_type: str = 'receivable'  # receivable | payable | other
+    opening_balance_direction: Optional[str] = None
+    opening_balance_date: Optional[Date] = None
+    opening_balance_description: str = ''
+    opening_balance_reference: str = ''
 
 class PaymentActionIn(Schema):
     amount: Decimal
     payment_method: str = 'Cash'
     reference: str = ''
     note: str = ''
-    date: Optional[date] = None
+    date: Optional[Date] = None
 
 class GarageIn(Schema):
     name: str
@@ -231,9 +195,10 @@ class GarageIn(Schema):
 class MaintenanceIn(Schema):
     vehicle_reg: str
     garage_name: str
-    date: date
+    date: Date
     problem_description: str
-    service_type: Literal['Engine', 'Gearbox', 'Suspension', 'Brake', 'Electrical', 'AC', 'Tyre', 'Battery', 'Oil Change', 'General Service', 'Other'] = 'General Service'
+    service_type: Literal['Engine', 'Gearbox', 'Suspension', 'Brake', 'Electrical', 'AC', 'Tyre', 'Battery', 'Oil Change', 'General Service', 'Other', 'Custom'] = 'General Service'
+    custom_purpose: str = ''
     parts_details: str = ''
     labour_cost: Decimal = D(0)
     parts_cost: Decimal = D(0)
@@ -242,7 +207,7 @@ class MaintenanceIn(Schema):
     status: Literal['Pending', 'In Progress', 'Completed', 'Delivered'] = 'Pending'
 
 class ExpenseInCustom(Schema):
-    date: date
+    date: Date
     category: str
     title: str
     amount: Decimal
@@ -267,14 +232,14 @@ class TransferIn(Schema):
     amount: Decimal
     reference: str = ''
     description: str = ''
-    date: Optional[date] = None
+    date: Optional[Date] = None
 
 class AlertIn(Schema):
     alert_type: Literal['payment', 'agreement', 'document', 'maintenance', 'custom'] = 'custom'
     severity: Literal['info', 'warning', 'danger'] = 'info'
     title: str
     detail: str = ''
-    due_date: Optional[date] = None
+    due_date: Optional[Date] = None
     related_id: str = ''
 
 class CompanyProfileIn(Schema):
@@ -366,8 +331,8 @@ class InvoiceItemIn(Schema):
 
 class InvoiceCreateIn(Schema):
     client_id: int
-    issue_date: date
-    due_date: date
+    issue_date: Date
+    due_date: Date
     discount: Decimal = D(0)
     tax: Decimal = D(0)
     notes: Optional[str] = ''
@@ -375,7 +340,7 @@ class InvoiceCreateIn(Schema):
     custom_items: list[InvoiceItemIn] = []
 
 class InvoicePaymentIn(Schema):
-    date: date
+    date: Date
     amount: Decimal
     payment_method: str = 'Cash'
     account_id: Optional[int] = None
@@ -384,7 +349,7 @@ class InvoicePaymentIn(Schema):
 
 class AttendanceIn(Schema):
     driver_id: int
-    date: date
+    date: Date
     status: Literal['Present', 'Absent', 'On Duty', 'Leave'] = 'Present'
     duty_id: Optional[int] = None
     notes: Optional[str] = ''
@@ -406,21 +371,21 @@ class SparePartIn(Schema):
 class PartConsumeIn(Schema):
     maintenance_id: int
     quantity: Decimal = D(1)
-    date: Optional[date] = None
+    date: Optional[Date] = None
 
 class DueFollowUpIn(Schema):
     party_id: int
     party_type: str = 'Customer'
-    follow_up_date: date
+    follow_up_date: Date
     contact_method: Literal['Phone Call', 'WhatsApp', 'In Person', 'Email'] = 'Phone Call'
     notes: str
-    next_follow_up_date: Optional[date] = None
+    next_follow_up_date: Optional[Date] = None
     responsible_staff: Optional[str] = ''
     status: Literal['Pending', 'Completed', 'Overdue'] = 'Pending'
 
 class CustomReminderIn(Schema):
     title: str
-    reminder_date: date
+    reminder_date: Date
     reminder_time: str = '09:00 AM'
     description: Optional[str] = ''
     related_entity_type: str = 'General'
@@ -431,8 +396,8 @@ class CustomReminderIn(Schema):
 class CustomReportIn(Schema):
     module: str
     fields: list[str] = []
-    start_date: Optional[date] = None
-    end_date: Optional[date] = None
+    start_date: Optional[Date] = None
+    end_date: Optional[Date] = None
     status_filter: Optional[str] = None
 
 class BankReconRowIn(Schema):
@@ -455,8 +420,8 @@ class DocumentUploadIn(Schema):
     mime_type: str = 'application/pdf'
 
 class RenewAgreementIn(Schema):
-    new_start_date: date
-    new_end_date: date
+    new_start_date: Date
+    new_end_date: Date
     new_monthly_rent: Decimal
 
 # ─── 0. SYSTEM HEALTH & CONNECTION CHECK (auth=None) ──────────────────────────
@@ -466,7 +431,7 @@ def health_check(request):
     """Universal healthcheck for server and proxy validation."""
     return {'status': 'ok', 'message': 'TASIN ENTERPRISE Backend is connected and running', 'version': '1.0.0', 'time': datetime.now().isoformat()}
 
-@router.get('/connection/status', auth=None)
+@router.get('/connection/status')
 def connection_status(request):
     """UI Connection verification endpoint."""
     org = _get_org(request)
@@ -504,7 +469,7 @@ def connection_status(request):
         ]
     }
 
-@router.get('/tasin/overview', auth=None)
+@router.get('/tasin/overview')
 def tasin_overview(request):
     """One-stop live snapshot feeding the entire frontend UI."""
     org = _get_org(request)
@@ -513,7 +478,7 @@ def tasin_overview(request):
 
 # ─── MODULE 01: DASHBOARD ────────────────────────────────────────────────────
 
-@router.get('/orgs/{org_id}/dashboard/kpis', auth=None)
+@router.get('/orgs/{org_id}/dashboard/kpis')
 def dashboard_kpis(request, org_id: int, date_filter: str | None = None, period: str | None = None):
     org = _get_org(request, org_id)
     target = date.today()
@@ -532,7 +497,7 @@ def dashboard_kpis(request, org_id: int, date_filter: str | None = None, period:
 
 # ─── MODULE 02: OWNERS MANAGEMENT ────────────────────────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-owners', auth=None)
+@router.get('/orgs/{org_id}/tasin-owners')
 def list_owners(request, org_id: int):
     org = _get_org(request, org_id)
     owners = Party.objects.filter(organization=org, kind=Party.Kind.OWNER).select_related('detail').prefetch_related('vehicles')
@@ -574,7 +539,7 @@ def list_owners(request, org_id: int):
         })
     return out
 
-@router.post('/orgs/{org_id}/tasin-owners', auth=None)
+@router.post('/orgs/{org_id}/tasin-owners')
 def create_owner(request, org_id: int, payload: OwnerIn):
     org = _get_org(request, org_id)
     with transaction.atomic():
@@ -600,9 +565,13 @@ def create_owner(request, org_id: int, payload: OwnerIn):
             joining_date=payload.joining_date or date.today(),
             status=payload.status
         )
+        if payload.opening_balance and payload.opening_balance > 0:
+            fin.set_opening_balance(org, p, _resolve_actor(request, org), payload.opening_balance_type, payload.opening_balance,
+                                    payload.opening_balance_date, payload.opening_balance_direction,
+                                    payload.opening_balance_description, payload.opening_balance_reference)
     return {'id': str(p.pk), 'ownerId': f'OWN-{p.pk:03d}', 'name': p.name, 'success': True}
 
-@router.put('/orgs/{org_id}/tasin-owners/{owner_id}', auth=None)
+@router.put('/orgs/{org_id}/tasin-owners/{owner_id}')
 def update_owner(request, org_id: int, owner_id: int, payload: OwnerIn):
     org = _get_org(request, org_id)
     p = Party.objects.filter(pk=owner_id, organization=org, kind=Party.Kind.OWNER).first()
@@ -626,30 +595,16 @@ def update_owner(request, org_id: int, owner_id: int, payload: OwnerIn):
     det.save()
     return {'id': str(p.pk), 'success': True}
 
-@router.post('/orgs/{org_id}/tasin-owners/{owner_id}/payments', auth=None)
+@router.post('/orgs/{org_id}/tasin-owners/{owner_id}/payments')
 def pay_owner(request, org_id: int, owner_id: int, payload: PaymentActionIn):
     org = _get_org(request, org_id)
     p = Party.objects.filter(pk=owner_id, organization=org, kind=Party.Kind.OWNER).first()
     if not p: raise ApiError(404, 'Owner not found')
-    det, _ = PartyDetail.objects.get_or_create(party=p)
-    det.total_paid_owner += payload.amount
-    det.save()
-    # Record transaction
-    AccountTransaction.objects.create(
-        organization=org,
-        transaction_id=f'TXN-{datetime.now().strftime("%Y%m%d%H%M%S")}',
-        date=payload.date or date.today(),
-        transaction_type='Expense',
-        category='Owner Payment',
-        related_person=p.name,
-        amount=payload.amount,
-        payment_method=payload.payment_method,
-        reference=payload.reference,
-        description=f'Payment to owner {p.name}: {payload.note}'
-    )
-    return {'success': True, 'owner': p.name, 'amountPaid': float(payload.amount), 'remainingDue': float(det.total_payable_owner - det.total_paid_owner)}
+    entry, remaining, _ = fin.party_payment(org, owner_id, 'owner', _resolve_actor(request, org), payload.amount, payload.date or date.today(),
+                                            payload.payment_method, payload.reference, payload.note)
+    return {'success': True, 'owner': p.name, 'amountPaid': float(payload.amount), 'remainingDue': float(remaining)}
 
-@router.delete('/orgs/{org_id}/tasin-owners/{owner_id}', auth=None)
+@router.delete('/orgs/{org_id}/tasin-owners/{owner_id}')
 def delete_owner(request, org_id: int, owner_id: int):
     org = _get_org(request, org_id)
     p = Party.objects.filter(pk=owner_id, organization=org, kind=Party.Kind.OWNER).first()
@@ -661,7 +616,7 @@ def delete_owner(request, org_id: int, owner_id: int):
 
 # ─── MODULE 03: VEHICLE MANAGEMENT ───────────────────────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-vehicles', auth=None)
+@router.get('/orgs/{org_id}/tasin-vehicles')
 def list_vehicles(request, org_id: int):
     org = _get_org(request, org_id)
     vehicles = Vehicle.objects.filter(organization=org).select_related('owner', 'detail', 'detail__assigned_driver')
@@ -697,7 +652,7 @@ def list_vehicles(request, org_id: int):
         })
     return out
 
-@router.post('/orgs/{org_id}/tasin-vehicles', auth=None)
+@router.post('/orgs/{org_id}/tasin-vehicles')
 def create_vehicle(request, org_id: int, payload: VehicleInCustom):
     org = _get_org(request, org_id)
     owner = Party.objects.filter(pk=payload.owner_id, organization=org).first() if payload.owner_id else None
@@ -734,7 +689,7 @@ def create_vehicle(request, org_id: int, payload: VehicleInCustom):
         )
     return {'id': str(v.pk), 'vehicleId': f'VEH-{v.pk:03d}', 'registration': v.registration, 'success': True}
 
-@router.put('/orgs/{org_id}/tasin-vehicles/{vehicle_id}', auth=None)
+@router.put('/orgs/{org_id}/tasin-vehicles/{vehicle_id}')
 def update_vehicle(request, org_id: int, vehicle_id: int, payload: VehicleInCustom):
     org = _get_org(request, org_id)
     v = Vehicle.objects.filter(pk=vehicle_id, organization=org).first()
@@ -757,7 +712,7 @@ def update_vehicle(request, org_id: int, vehicle_id: int, payload: VehicleInCust
     det.save()
     return {'id': str(v.pk), 'success': True}
 
-@router.delete('/orgs/{org_id}/tasin-vehicles/{vehicle_id}', auth=None)
+@router.delete('/orgs/{org_id}/tasin-vehicles/{vehicle_id}')
 def delete_vehicle(request, org_id: int, vehicle_id: int):
     org = _get_org(request, org_id)
     v = Vehicle.objects.filter(pk=vehicle_id, organization=org).first()
@@ -767,7 +722,7 @@ def delete_vehicle(request, org_id: int, vehicle_id: int):
     det.save()
     return {'id': str(v.pk), 'status': 'Inactive', 'success': True}
 
-@router.get('/orgs/{org_id}/tasin-vehicles/{vehicle_id}/papers', auth=None)
+@router.get('/orgs/{org_id}/tasin-vehicles/{vehicle_id}/papers')
 def get_vehicle_papers(request, org_id: int, vehicle_id: int):
     org = _get_org(request, org_id)
     papers = VehiclePaper.objects.filter(vehicle_id=vehicle_id, organization=org)
@@ -781,7 +736,7 @@ def get_vehicle_papers(request, org_id: int, vehicle_id: int):
         'documentUrl': p.document_url
     } for p in papers]
 
-@router.post('/orgs/{org_id}/tasin-vehicles/{vehicle_id}/papers', auth=None)
+@router.post('/orgs/{org_id}/tasin-vehicles/{vehicle_id}/papers')
 def add_vehicle_paper(request, org_id: int, vehicle_id: int, payload: VehiclePaperIn):
     org = _get_org(request, org_id)
     v = Vehicle.objects.filter(pk=vehicle_id, organization=org).first()
@@ -800,7 +755,7 @@ def add_vehicle_paper(request, org_id: int, vehicle_id: int, payload: VehiclePap
 
 # ─── MODULE 04: DRIVERS MANAGEMENT ───────────────────────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-drivers', auth=None)
+@router.get('/orgs/{org_id}/tasin-drivers')
 def list_drivers(request, org_id: int):
     org = _get_org(request, org_id)
     drivers = Party.objects.filter(organization=org, kind=Party.Kind.DRIVER).select_related('detail', 'detail__assigned_vehicle')
@@ -810,8 +765,9 @@ def list_drivers(request, org_id: int):
         v_reg = det.assigned_vehicle.registration if det and det.assigned_vehicle else ''
         salary = det.monthly_salary if det else D(18000)
         paid = det.total_paid_driver if det else D(0)
-        adv = det.advance if det else D(0)
-        due = salary - paid + adv
+        adv = fin.balance(d, fin.A.DRIVER_ADVANCE)
+        fuel_gas = fin.balance(d, fin.A.DRIVER_FUEL_GAS)
+        due = fin.driver_payable_for_dues(d)
         out.append({
             'id': str(d.pk),
             'driverId': f'DRV-{d.pk:03d}',
@@ -832,12 +788,14 @@ def list_drivers(request, org_id: int):
             'monthlySalary': float(salary),
             'dailyAllowance': float(det.daily_allowance if det else 300),
             'advance': float(adv),
+            'advanceDue': float(adv),
+            'fuelGasDue': float(fuel_gas),
             'totalPaid': float(paid),
             'remainingDue': float(due)
         })
     return out
 
-@router.post('/orgs/{org_id}/tasin-drivers', auth=None)
+@router.post('/orgs/{org_id}/tasin-drivers')
 def create_driver(request, org_id: int, payload: DriverIn):
     org = _get_org(request, org_id)
     veh = Vehicle.objects.filter(pk=payload.assigned_vehicle_id, organization=org).first() if payload.assigned_vehicle_id else None
@@ -867,9 +825,17 @@ def create_driver(request, org_id: int, payload: DriverIn):
             status=payload.status,
             assigned_vehicle=veh
         )
+        actor = _resolve_actor(request, org)
+        od = payload.opening_balance_date
+        if payload.advance and payload.advance > 0:
+            fin.set_opening_balance(org, d, actor, 'advance', payload.advance, od, description='Opening advance')
+        if payload.previous_salary_due and payload.previous_salary_due > 0:
+            fin.set_opening_balance(org, d, actor, 'salary_due', payload.previous_salary_due, od, description='Previous salary due')
+        if payload.previous_fuel_gas_due and payload.previous_fuel_gas_due > 0:
+            fin.set_opening_balance(org, d, actor, 'fuel_gas', payload.previous_fuel_gas_due, od, description='Previous fuel/gas due')
     return {'id': str(d.pk), 'driverId': f'DRV-{d.pk:03d}', 'name': d.name, 'success': True}
 
-@router.put('/orgs/{org_id}/tasin-drivers/{driver_id}', auth=None)
+@router.put('/orgs/{org_id}/tasin-drivers/{driver_id}')
 def update_driver(request, org_id: int, driver_id: int, payload: DriverIn):
     org = _get_org(request, org_id)
     d = Party.objects.filter(pk=driver_id, organization=org, kind=Party.Kind.DRIVER).first()
@@ -887,36 +853,34 @@ def update_driver(request, org_id: int, driver_id: int, payload: DriverIn):
     det.emergency_contact = payload.emergency_contact.strip()
     det.monthly_salary = payload.monthly_salary
     det.daily_allowance = payload.daily_allowance
-    det.advance = payload.advance
     det.status = payload.status
     if payload.assigned_vehicle_id:
         det.assigned_vehicle_id = payload.assigned_vehicle_id
     det.save()
     return {'id': str(d.pk), 'success': True}
 
-@router.post('/orgs/{org_id}/tasin-drivers/{driver_id}/payments', auth=None)
+@router.post('/orgs/{org_id}/tasin-drivers/{driver_id}/payments')
 def pay_driver(request, org_id: int, driver_id: int, payload: PaymentActionIn):
+    """Ad-hoc salary payout. Posts through the party ledger (capped at the salary due); use the salary-payments
+    workflow for month settlement with advance / fuel-gas adjustment."""
     org = _get_org(request, org_id)
-    d = Party.objects.filter(pk=driver_id, organization=org, kind=Party.Kind.DRIVER).first()
-    if not d: raise ApiError(404, 'Driver not found')
-    det, _ = PartyDetail.objects.get_or_create(party=d)
-    det.total_paid_driver += payload.amount
-    det.save()
-    AccountTransaction.objects.create(
-        organization=org,
-        transaction_id=f'TXN-{datetime.now().strftime("%Y%m%d%H%M%S")}',
-        date=payload.date or date.today(),
-        transaction_type='Expense',
-        category='Driver Salary',
-        related_person=d.name,
-        amount=payload.amount,
-        payment_method=payload.payment_method,
-        reference=payload.reference,
-        description=f'Salary / Payout to driver {d.name}: {payload.note}'
-    )
-    return {'success': True, 'driver': d.name, 'amountPaid': float(payload.amount), 'remainingDue': float(det.monthly_salary - det.total_paid_driver + det.advance)}
+    actor = _resolve_actor(request, org)
+    amount = fin.money(payload.amount)
+    on_date = payload.date or date.today()
+    with transaction.atomic():
+        d = fin.lock_party(org, driver_id, 'driver')
+        fin.ensure_salary_accrual(org, d, on_date, actor)
+        bal = fin.balance(d, fin.A.DRIVER_SALARY)
+        if amount > bal:
+            raise ApiError(422, fin.FinanceError('exceeds_balance', f'Payment (৳{amount}) exceeds the salary due (৳{bal})'))
+        fin.post_entry(org, d, fin.A.DRIVER_SALARY, fin.T.PAYMENT, -amount, on_date, actor, payment_method=payload.payment_method,
+                       reference=payload.reference, description=payload.note or 'Salary payout', source_type='salary_payout')
+        fin._post_account_txn(org, actor, on_date, 'Expense', 'Driver Salary', d.name, amount, payload.payment_method, payload.reference,
+                              f'Salary / Payout to driver {d.name}: {payload.note}', source='salary_payout')
+        remaining = fin.balance(d, fin.A.DRIVER_SALARY)
+    return {'success': True, 'driver': d.name, 'amountPaid': float(amount), 'remainingDue': float(remaining)}
 
-@router.delete('/orgs/{org_id}/tasin-drivers/{driver_id}', auth=None)
+@router.delete('/orgs/{org_id}/tasin-drivers/{driver_id}')
 def delete_driver(request, org_id: int, driver_id: int):
     org = _get_org(request, org_id)
     d = Party.objects.filter(pk=driver_id, organization=org, kind=Party.Kind.DRIVER).first()
@@ -928,7 +892,7 @@ def delete_driver(request, org_id: int, driver_id: int):
 
 # ─── MODULE 05: CLIENTS & COMPANIES MANAGEMENT ───────────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-clients', auth=None)
+@router.get('/orgs/{org_id}/tasin-clients')
 def list_clients(request, org_id: int):
     org = _get_org(request, org_id)
     clients = Party.objects.filter(organization=org, kind=Party.Kind.CUSTOMER).select_related('detail')
@@ -956,7 +920,7 @@ def list_clients(request, org_id: int):
         })
     return out
 
-@router.get('/orgs/{org_id}/tasin-clients/{client_id}/profile', auth=None)
+@router.get('/orgs/{org_id}/tasin-clients/{client_id}/profile')
 def get_client_profile(request, org_id: int, client_id: int):
     org = _get_org(request, org_id)
     c = Party.objects.filter(pk=client_id, organization=org, kind=Party.Kind.CUSTOMER).first()
@@ -1036,7 +1000,7 @@ def get_client_profile(request, org_id: int, client_id: int):
         'payments': payments_data
     }
 
-@router.post('/orgs/{org_id}/tasin-clients', auth=None)
+@router.post('/orgs/{org_id}/tasin-clients')
 def create_client(request, org_id: int, payload: ClientIn):
     org = _get_org(request, org_id)
     with transaction.atomic():
@@ -1057,31 +1021,22 @@ def create_client(request, org_id: int, payload: ClientIn):
             joining_date=payload.joining_date or date.today(),
             status=payload.status
         )
+        if payload.opening_balance and payload.opening_balance > 0:
+            fin.set_opening_balance(org, c, _resolve_actor(request, org), payload.opening_balance_type, payload.opening_balance,
+                                    payload.opening_balance_date, payload.opening_balance_direction,
+                                    payload.opening_balance_description, payload.opening_balance_reference)
     return {'id': str(c.pk), 'clientId': f'CLT-{c.pk:03d}', 'name': c.name, 'success': True}
 
-@router.post('/orgs/{org_id}/tasin-clients/{client_id}/collections', auth=None)
+@router.post('/orgs/{org_id}/tasin-clients/{client_id}/collections')
 def collect_client_payment(request, org_id: int, client_id: int, payload: PaymentActionIn):
     org = _get_org(request, org_id)
     c = Party.objects.filter(pk=client_id, organization=org, kind=Party.Kind.CUSTOMER).first()
     if not c: raise ApiError(404, 'Client not found')
-    det, _ = PartyDetail.objects.get_or_create(party=c)
-    det.total_collected_client += payload.amount
-    det.save()
-    AccountTransaction.objects.create(
-        organization=org,
-        transaction_id=f'TXN-{datetime.now().strftime("%Y%m%d%H%M%S")}',
-        date=payload.date or date.today(),
-        transaction_type='Income',
-        category='Customer Collection',
-        related_person=c.name,
-        amount=payload.amount,
-        payment_method=payload.payment_method,
-        reference=payload.reference,
-        description=f'Payment received from client {c.name}: {payload.note}'
-    )
-    return {'success': True, 'client': c.name, 'amountCollected': float(payload.amount), 'remainingDue': float(det.total_receivable_client - det.total_collected_client)}
+    entry, remaining, _ = fin.party_payment(org, client_id, 'customer', _resolve_actor(request, org), payload.amount, payload.date or date.today(),
+                                            payload.payment_method, payload.reference, payload.note)
+    return {'success': True, 'client': c.name, 'amountCollected': float(payload.amount), 'remainingDue': float(remaining)}
 
-@router.put('/orgs/{org_id}/tasin-clients/{client_id}', auth=None)
+@router.put('/orgs/{org_id}/tasin-clients/{client_id}')
 def update_client(request, org_id: int, client_id: int, payload: ClientIn):
     org = _get_org(request, org_id)
     c = Party.objects.filter(pk=client_id, organization=org, kind=Party.Kind.CUSTOMER).first()
@@ -1100,7 +1055,7 @@ def update_client(request, org_id: int, client_id: int, payload: ClientIn):
     det.save()
     return {'id': str(c.pk), 'clientId': f'CLT-{c.pk:03d}', 'name': c.name, 'success': True}
 
-@router.delete('/orgs/{org_id}/tasin-clients/{client_id}', auth=None)
+@router.delete('/orgs/{org_id}/tasin-clients/{client_id}')
 def delete_client(request, org_id: int, client_id: int):
     org = _get_org(request, org_id)
     c = Party.objects.filter(pk=client_id, organization=org, kind=Party.Kind.CUSTOMER).first()
@@ -1110,7 +1065,7 @@ def delete_client(request, org_id: int, client_id: int):
 
 # ─── INVOICE ENGINE ENDPOINTS (Module 05 & 06) ────────────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-invoices', auth=None)
+@router.get('/orgs/{org_id}/tasin-invoices')
 def list_invoices(request, org_id: int, client_id: Optional[int] = None, status: Optional[str] = None):
     org = _get_org(request, org_id)
     qs = TasinInvoice.objects.filter(organization=org).select_related('client').prefetch_related('items', 'payments')
@@ -1145,7 +1100,7 @@ def list_invoices(request, org_id: int, client_id: Optional[int] = None, status:
         } for it in inv.items.all()]
     } for inv in qs]
 
-@router.post('/orgs/{org_id}/tasin-invoices', auth=None)
+@router.post('/orgs/{org_id}/tasin-invoices')
 def create_invoice(request, org_id: int, payload: InvoiceCreateIn):
     org = _get_org(request, org_id)
     client = Party.objects.filter(pk=payload.client_id, organization=org, kind=Party.Kind.CUSTOMER).first()
@@ -1203,9 +1158,11 @@ def create_invoice(request, org_id: int, payload: InvoiceCreateIn):
         inv.save()
 
         # Update client receivable
-        det, _ = PartyDetail.objects.get_or_create(party=client)
-        det.total_receivable_client += inv.total_amount
-        det.save()
+        fin.lock_party(org, client.pk)
+        if inv.total_amount > 0:
+            fin.post_entry(org, client, fin.A.CLIENT_RECEIVABLE, fin.T.INVOICE, inv.total_amount, inv.issue_date, None,
+                           unique_key=f'invoice:{inv.pk}', reference=inv.invoice_number, description=f'Invoice {inv.invoice_number}',
+                           source_type='invoice', source_id=str(inv.pk))
 
     return {
         'id': str(inv.pk),
@@ -1215,7 +1172,7 @@ def create_invoice(request, org_id: int, payload: InvoiceCreateIn):
         'success': True
     }
 
-@router.get('/orgs/{org_id}/tasin-invoices/{invoice_id}', auth=None)
+@router.get('/orgs/{org_id}/tasin-invoices/{invoice_id}')
 def get_invoice(request, org_id: int, invoice_id: int):
     org = _get_org(request, org_id)
     inv = TasinInvoice.objects.filter(pk=invoice_id, organization=org).select_related('client').prefetch_related('items', 'payments').first()
@@ -1255,7 +1212,7 @@ def get_invoice(request, org_id: int, invoice_id: int):
         } for p in inv.payments.all()]
     }
 
-@router.post('/orgs/{org_id}/tasin-invoices/{invoice_id}/payments', auth=None)
+@router.post('/orgs/{org_id}/tasin-invoices/{invoice_id}/payments')
 def record_invoice_payment(request, org_id: int, invoice_id: int, payload: InvoicePaymentIn):
     org = _get_org(request, org_id)
     with transaction.atomic():
@@ -1300,9 +1257,10 @@ def record_invoice_payment(request, org_id: int, invoice_id: int, payload: Invoi
         inv.save()
 
         # Update client collections
-        det, _ = PartyDetail.objects.get_or_create(party=inv.client)
-        det.total_collected_client += payload.amount
-        det.save()
+        fin.lock_party(org, inv.client_id)
+        fin.post_entry(org, inv.client, fin.A.CLIENT_RECEIVABLE, fin.T.PAYMENT, -payload.amount, payload.date, None,
+                       unique_key=f'invpay:{inv.pk}:{p_count}', payment_method=payload.payment_method, reference=payload.reference or inv.invoice_number,
+                       description=f'Payment for {inv.invoice_number}', source_type='invoice_payment', source_id=str(inv.pk))
 
         # Record transaction in accounts ledger
         AccountTransaction.objects.create(
@@ -1330,7 +1288,7 @@ def record_invoice_payment(request, org_id: int, invoice_id: int, payload: Invoi
 
 # ─── MODULE 06: DAILY OPERATIONS / DUTY MANAGEMENT ───────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-duties', auth=None)
+@router.get('/orgs/{org_id}/tasin-duties')
 def list_duties(request, org_id: int, date_val: str | None = None, status: str | None = None):
     org = _get_org(request, org_id)
     qs = Duty.objects.filter(organization=org)
@@ -1368,7 +1326,7 @@ def list_duties(request, org_id: int, date_val: str | None = None, status: str |
         })
     return out
 
-@router.post('/orgs/{org_id}/tasin-duties', auth=None)
+@router.post('/orgs/{org_id}/tasin-duties')
 def create_duty(request, org_id: int, payload: DutyIn):
     org = _get_org(request, org_id)
     total = payload.agreed_rent + payload.fuel_cost + payload.overtime_charge + payload.driver_allowance + payload.additional_charge - payload.discount
@@ -1427,7 +1385,7 @@ def create_duty(request, org_id: int, payload: DutyIn):
     )
     return {'id': str(d.pk), 'dutyId': d.duty_id, 'totalAmount': float(d.total_amount), 'success': True}
 
-@router.post('/orgs/{org_id}/tasin-duties/{duty_id}/status', auth=None)
+@router.post('/orgs/{org_id}/tasin-duties/{duty_id}/status')
 def set_duty_status(request, org_id: int, duty_id: int, payload: DutyStatusIn):
     org = _get_org(request, org_id)
     d = Duty.objects.filter(pk=duty_id, organization=org).first()
@@ -1446,7 +1404,7 @@ def set_duty_status(request, org_id: int, duty_id: int, payload: DutyStatusIn):
 
 # ─── MODULE 07: DAILY EXPENSES MANAGEMENT ─────────────────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-expenses', auth=None)
+@router.get('/orgs/{org_id}/tasin-expenses')
 def list_daily_expenses(request, org_id: int, date_val: str | None = None, category: str | None = None):
     org = _get_org(request, org_id)
     qs = AccountTransaction.objects.filter(organization=org, transaction_type='Expense')
@@ -1467,7 +1425,7 @@ def list_daily_expenses(request, org_id: int, date_val: str | None = None, categ
         'vehicleReg': t.vehicle_reg
     } for t in qs]
 
-@router.post('/orgs/{org_id}/tasin-expenses', auth=None)
+@router.post('/orgs/{org_id}/tasin-expenses')
 def record_daily_expense(request, org_id: int, payload: ExpenseInCustom):
     org = _get_org(request, org_id)
     if payload.reference and payload.reference.strip():
@@ -1492,7 +1450,7 @@ def record_daily_expense(request, org_id: int, payload: ExpenseInCustom):
 
 # ─── MODULE 08: MAINTENANCE & GARAGE MANAGEMENT ───────────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-garages', auth=None)
+@router.get('/orgs/{org_id}/tasin-garages')
 def list_garages(request, org_id: int):
     org = _get_org(request, org_id)
     garages = Garage.objects.filter(organization=org)
@@ -1510,7 +1468,7 @@ def list_garages(request, org_id: int):
         'due': float(g.total_bill - g.total_paid)
     } for g in garages]
 
-@router.post('/orgs/{org_id}/tasin-garages', auth=None)
+@router.post('/orgs/{org_id}/tasin-garages')
 def create_garage(request, org_id: int, payload: GarageIn):
     org = _get_org(request, org_id)
     count = Garage.objects.filter(organization=org).count() + 1
@@ -1526,7 +1484,7 @@ def create_garage(request, org_id: int, payload: GarageIn):
     )
     return {'id': str(g.pk), 'garageId': g.garage_id, 'name': g.name, 'success': True}
 
-@router.post('/orgs/{org_id}/tasin-garages/{garage_id}/payments', auth=None)
+@router.post('/orgs/{org_id}/tasin-garages/{garage_id}/payments')
 def record_garage_payment(request, org_id: int, garage_id: int, payload: PaymentActionIn):
     org = _get_org(request, org_id)
     g = Garage.objects.filter(pk=garage_id, organization=org).first()
@@ -1549,7 +1507,7 @@ def record_garage_payment(request, org_id: int, garage_id: int, payload: Payment
         )
     return {'success': True, 'garage': g.name, 'amountPaid': float(payload.amount), 'remainingDue': float(g.total_bill - g.total_paid)}
 
-@router.delete('/orgs/{org_id}/tasin-garages/{garage_id}', auth=None)
+@router.delete('/orgs/{org_id}/tasin-garages/{garage_id}')
 def delete_garage(request, org_id: int, garage_id: int):
     org = _get_org(request, org_id)
     g = Garage.objects.filter(pk=garage_id, organization=org).first()
@@ -1558,7 +1516,18 @@ def delete_garage(request, org_id: int, garage_id: int):
     g.save()
     return {'id': str(g.pk), 'status': 'Inactive', 'success': True}
 
-@router.get('/orgs/{org_id}/tasin-maintenance', auth=None)
+def _clean_purpose(payload):
+    '''Custom purpose: required (and trimmed) when service_type is 'Custom'; ignored otherwise.'''
+    if payload.service_type != 'Custom':
+        return ''
+    purpose = ' '.join((payload.custom_purpose or '').split())
+    if not purpose:
+        raise ApiError(422, fin.FinanceError('purpose_required', 'Enter the custom maintenance purpose'))
+    if len(purpose) > 120:
+        raise ApiError(422, fin.FinanceError('purpose_too_long', 'Custom purpose must be 120 characters or fewer'))
+    return purpose
+
+@router.get('/orgs/{org_id}/tasin-maintenance')
 def list_maintenance(request, org_id: int):
     org = _get_org(request, org_id)
     qs = MaintenanceRecord.objects.filter(organization=org)
@@ -1570,6 +1539,8 @@ def list_maintenance(request, org_id: int):
         'date': m.date.isoformat(),
         'problemDescription': m.problem_description,
         'serviceType': m.service_type,
+        'customPurpose': m.custom_purpose,
+        'purpose': m.custom_purpose if m.service_type == 'Custom' and m.custom_purpose else m.service_type,
         'partsDetails': m.parts_details,
         'labourCost': float(m.labour_cost),
         'partsCost': float(m.parts_cost),
@@ -1579,19 +1550,22 @@ def list_maintenance(request, org_id: int):
         'status': m.status
     } for m in qs]
 
-@router.post('/orgs/{org_id}/tasin-maintenance', auth=None)
+@router.post('/orgs/{org_id}/tasin-maintenance')
 def create_maintenance(request, org_id: int, payload: MaintenanceIn):
     org = _get_org(request, org_id)
+    custom_purpose = _clean_purpose(payload)
     total = payload.labour_cost + payload.parts_cost
     count = MaintenanceRecord.objects.filter(organization=org).count() + 1
     m = MaintenanceRecord.objects.create(
         organization=org,
         maintenance_id=f'MNT-{count:03d}',
+        vehicle=Vehicle.objects.filter(organization=org, registration=payload.vehicle_reg.strip()).first(),
         vehicle_reg=payload.vehicle_reg.strip(),
         garage_name=payload.garage_name.strip(),
         date=payload.date,
         problem_description=payload.problem_description.strip(),
         service_type=payload.service_type,
+        custom_purpose=custom_purpose,
         parts_details=payload.parts_details.strip(),
         labour_cost=payload.labour_cost,
         parts_cost=payload.parts_cost,
@@ -1619,19 +1593,22 @@ def create_maintenance(request, org_id: int, payload: MaintenanceIn):
         det.save()
     return {'id': str(m.pk), 'maintenanceId': m.maintenance_id, 'totalCost': float(m.total_cost), 'success': True}
 
-@router.put('/orgs/{org_id}/tasin-maintenance/{mnt_id}', auth=None)
+@router.put('/orgs/{org_id}/tasin-maintenance/{mnt_id}')
 def update_maintenance(request, org_id: int, mnt_id: int, payload: MaintenanceIn):
     org = _get_org(request, org_id)
     m = MaintenanceRecord.objects.filter(pk=mnt_id, organization=org).first()
     if not m: raise ApiError(404, 'Maintenance record not found')
+    custom_purpose = _clean_purpose(payload)
     old_total = m.total_cost
     new_total = payload.labour_cost + payload.parts_cost
 
     m.vehicle_reg = payload.vehicle_reg.strip()
+    m.vehicle = Vehicle.objects.filter(organization=org, registration=m.vehicle_reg).first()
     m.garage_name = payload.garage_name.strip()
     m.date = payload.date
     m.problem_description = payload.problem_description.strip()
     m.service_type = payload.service_type
+    m.custom_purpose = custom_purpose
     m.parts_details = payload.parts_details.strip()
     m.labour_cost = payload.labour_cost
     m.parts_cost = payload.parts_cost
@@ -1661,7 +1638,7 @@ def update_maintenance(request, org_id: int, mnt_id: int, payload: MaintenanceIn
 
     return {'id': str(m.pk), 'maintenanceId': m.maintenance_id, 'totalCost': float(m.total_cost), 'success': True}
 
-@router.delete('/orgs/{org_id}/tasin-maintenance/{mnt_id}', auth=None)
+@router.delete('/orgs/{org_id}/tasin-maintenance/{mnt_id}')
 def delete_maintenance(request, org_id: int, mnt_id: int):
     org = _get_org(request, org_id)
     m = MaintenanceRecord.objects.filter(pk=mnt_id, organization=org).first()
@@ -1681,7 +1658,7 @@ def delete_maintenance(request, org_id: int, mnt_id: int):
 
 # ─── MODULE 10: ACCOUNTS & TRANSACTIONS ───────────────────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-accounts', auth=None)
+@router.get('/orgs/{org_id}/tasin-accounts')
 def list_accounts(request, org_id: int):
     org = _get_org(request, org_id)
     accounts = FinancialAccount.objects.filter(organization=org, is_active=True)
@@ -1696,7 +1673,7 @@ def list_accounts(request, org_id: int):
         'currentBalance': float(a.current_balance)
     } for a in accounts]
 
-@router.post('/orgs/{org_id}/tasin-accounts', auth=None)
+@router.post('/orgs/{org_id}/tasin-accounts')
 def create_account(request, org_id: int, payload: FinancialAccountIn):
     org = _get_org(request, org_id)
     count = FinancialAccount.objects.filter(organization=org).count() + 1
@@ -1713,7 +1690,7 @@ def create_account(request, org_id: int, payload: FinancialAccountIn):
     )
     return {'id': str(a.pk), 'accountId': a.account_id, 'name': a.name, 'success': True}
 
-@router.get('/orgs/{org_id}/tasin-transactions', auth=None)
+@router.get('/orgs/{org_id}/tasin-transactions')
 def list_transactions(request, org_id: int):
     org = _get_org(request, org_id)
     txns = AccountTransaction.objects.filter(organization=org)[:50]
@@ -1731,7 +1708,7 @@ def list_transactions(request, org_id: int):
         'description': t.description
     } for t in txns]
 
-@router.post('/orgs/{org_id}/tasin-accounts/transfer', auth=None)
+@router.post('/orgs/{org_id}/tasin-accounts/transfer')
 def transfer_money(request, org_id: int, payload: TransferIn):
     org = _get_org(request, org_id)
     from_acc = FinancialAccount.objects.filter(pk=payload.from_account_id, organization=org).first()
@@ -1763,7 +1740,7 @@ def transfer_money(request, org_id: int, payload: TransferIn):
 
 # ─── MODULE 11: DUE & COLLECTION MANAGEMENT ──────────────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-due-collection', auth=None)
+@router.get('/orgs/{org_id}/tasin-due-collection')
 def due_collection_summary(request, org_id: int):
     org = _get_org(request, org_id)
     # 1. Clients
@@ -1811,9 +1788,10 @@ def due_collection_summary(request, org_id: int):
         det = getattr(d, 'detail', None)
         sal = det.monthly_salary if det else D(0)
         allow = det.daily_allowance if det else D(0)
-        adv = det.advance if det else D(0)
+        adv = fin.balance(d, fin.A.DRIVER_ADVANCE)
+        fuel_gas = fin.balance(d, fin.A.DRIVER_FUEL_GAS)
         paid = det.total_paid_driver if det else D(0)
-        rem = max(D(0), sal - paid + adv)
+        rem = max(D(0), fin.driver_payable_for_dues(d))
         driver_dues.append({
             'id': str(d.pk),
             'name': d.name,
@@ -1822,6 +1800,8 @@ def due_collection_summary(request, org_id: int):
             'salary': float(sal),
             'allowance': float(allow),
             'advance': float(adv),
+            'advanceDue': float(adv),
+            'fuelGasDue': float(fuel_gas),
             'totalPaid': float(paid),
             'remaining': float(rem)
         })
@@ -1863,7 +1843,7 @@ def due_collection_summary(request, org_id: int):
 
 # ─── MODULE 12: GLOBAL VEHICLE SEARCH & STATEMENT ─────────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-vehicle-search', auth=None)
+@router.get('/orgs/{org_id}/tasin-vehicle-search')
 def search_vehicles_global(request, org_id: int, q: str = ''):
     org = _get_org(request, org_id)
     qs = Vehicle.objects.filter(organization=org).select_related('owner', 'detail', 'detail__assigned_driver')
@@ -1885,7 +1865,7 @@ def search_vehicles_global(request, org_id: int, q: str = ''):
         'monthlyRent': float(getattr(v, 'detail', None) and v.detail.monthly_rent or 50000)
     } for v in qs]
 
-@router.get('/orgs/{org_id}/tasin-vehicle-search/{vehicle_id}/statement', auth=None)
+@router.get('/orgs/{org_id}/tasin-vehicle-search/{vehicle_id}/statement')
 def vehicle_full_statement(request, org_id: int, vehicle_id: int):
     org = _get_org(request, org_id)
     v = Vehicle.objects.filter(pk=vehicle_id, organization=org).select_related('owner', 'detail', 'detail__assigned_driver').first()
@@ -1920,7 +1900,9 @@ def vehicle_full_statement(request, org_id: int, vehicle_id: int):
             'netProfit': float(total_duty_income - owner_rent - total_maintenance)
         },
         'papers': [{
+            'id': p.pk,
             'type': p.paper_type,
+            'title': p.title,
             'number': p.paper_number,
             'expiry': p.expiry_date.isoformat() if p.expiry_date else '',
             'status': p.status
@@ -1937,7 +1919,7 @@ def vehicle_full_statement(request, org_id: int, vehicle_id: int):
             'id': m.maintenance_id,
             'date': m.date.isoformat(),
             'garage': m.garage_name,
-            'service': m.service_type,
+            'service': m.custom_purpose if m.service_type == 'Custom' and m.custom_purpose else m.service_type,
             'cost': float(m.total_cost),
             'status': m.status
         } for m in maintenances[:10]]
@@ -1945,7 +1927,7 @@ def vehicle_full_statement(request, org_id: int, vehicle_id: int):
 
 # ─── MODULE 14: NOTIFICATIONS & ALERTS ────────────────────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-alerts', auth=None)
+@router.get('/orgs/{org_id}/tasin-alerts')
 def list_system_alerts(request, org_id: int):
     org = _get_org(request, org_id)
     alerts = SystemAlert.objects.filter(organization=org)
@@ -1962,7 +1944,7 @@ def list_system_alerts(request, org_id: int):
         'isRead': a.is_read
     } for a in alerts]
 
-@router.post('/orgs/{org_id}/tasin-alerts', auth=None)
+@router.post('/orgs/{org_id}/tasin-alerts')
 def create_system_alert(request, org_id: int, payload: AlertIn):
     org = _get_org(request, org_id)
     count = SystemAlert.objects.filter(organization=org).count() + 1
@@ -1979,7 +1961,7 @@ def create_system_alert(request, org_id: int, payload: AlertIn):
     )
     return {'id': str(a.pk), 'alertId': a.alert_id, 'success': True}
 
-@router.post('/orgs/{org_id}/tasin-alerts/{alert_id}/read', auth=None)
+@router.post('/orgs/{org_id}/tasin-alerts/{alert_id}/read')
 def mark_alert_read(request, org_id: int, alert_id: int):
     org = _get_org(request, org_id)
     a = SystemAlert.objects.filter(pk=alert_id, organization=org).first()
@@ -1990,7 +1972,7 @@ def mark_alert_read(request, org_id: int, alert_id: int):
 
 # ─── MODULE 15: SETTINGS & USER MANAGEMENT ───────────────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-settings/company', auth=None)
+@router.get('/orgs/{org_id}/tasin-settings/company')
 def get_company_settings(request, org_id: int):
     org = _get_org(request, org_id)
     profile = get_or_create_company_profile(org)
@@ -2007,7 +1989,7 @@ def get_company_settings(request, org_id: int):
         'timezone': profile.timezone
     }
 
-@router.put('/orgs/{org_id}/tasin-settings/company', auth=None)
+@router.put('/orgs/{org_id}/tasin-settings/company')
 def update_company_settings(request, org_id: int, payload: CompanyProfileIn):
     org = _get_org(request, org_id)
     profile = get_or_create_company_profile(org)
@@ -2026,7 +2008,7 @@ def update_company_settings(request, org_id: int, payload: CompanyProfileIn):
 
 # ─── MODULE 15: RBAC & USER MANAGEMENT ────────────────────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-settings/users', auth=None)
+@router.get('/orgs/{org_id}/tasin-settings/users')
 def list_system_users(request, org_id: int):
     org = _get_org(request, org_id)
     User = get_user_model()
@@ -2104,7 +2086,7 @@ def list_system_users(request, org_id: int):
         })
     return users_list
 
-@router.post('/orgs/{org_id}/tasin-settings/users', auth=None)
+@router.post('/orgs/{org_id}/tasin-settings/users')
 def create_system_user(request, org_id: int, payload: UserCreateIn):
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
@@ -2246,7 +2228,7 @@ def create_system_user(request, org_id: int, payload: UserCreateIn):
         'success': True
     }
 
-@router.put('/orgs/{org_id}/tasin-settings/users/{user_id}/profile', auth=None)
+@router.put('/orgs/{org_id}/tasin-settings/users/{user_id}/profile')
 def update_user_profile(request, org_id: int, user_id: int, payload: UserProfileUpdateIn):
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
@@ -2344,7 +2326,7 @@ def update_user_profile(request, org_id: int, user_id: int, payload: UserProfile
 
     return {'success': True, 'id': str(target_user.pk), 'username': target_user.username}
 
-@router.post('/orgs/{org_id}/tasin-settings/users/{user_id}/reset-password', auth=None)
+@router.post('/orgs/{org_id}/tasin-settings/users/{user_id}/reset-password')
 def reset_user_password(request, org_id: int, user_id: int, payload: UserPasswordResetIn):
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
@@ -2370,7 +2352,7 @@ def reset_user_password(request, org_id: int, user_id: int, payload: UserPasswor
 
     return {'success': True, 'id': str(target_user.pk), 'message': f'Password reset successfully for {target_user.username}'}
 
-@router.delete('/orgs/{org_id}/tasin-settings/users/{user_id}', auth=None)
+@router.delete('/orgs/{org_id}/tasin-settings/users/{user_id}')
 def delete_system_user(request, org_id: int, user_id: int):
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
@@ -2405,7 +2387,7 @@ def delete_system_user(request, org_id: int, user_id: int):
 
 # ─── DYNAMIC RBAC MATRIX PERMISSIONS ─────────────────────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-settings/users/{user_id}/permissions', auth=None)
+@router.get('/orgs/{org_id}/tasin-settings/users/{user_id}/permissions')
 def get_user_permissions_matrix(request, org_id: int, user_id: int):
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
@@ -2413,6 +2395,8 @@ def get_user_permissions_matrix(request, org_id: int, user_id: int):
     target_user = User.objects.filter(pk=user_id).first()
     if not target_user:
         raise ApiError(404, 'User not found')
+    if target_user.pk != actor.pk and not (is_super_admin(actor, org) or is_main_admin(actor, org)):
+        raise fin.FinanceError('forbidden', 'You can only view your own permissions', status=403)
 
     modules_map = get_user_module_permissions_map(target_user, org)
     role = get_user_role(target_user, org)
@@ -2430,7 +2414,7 @@ def get_user_permissions_matrix(request, org_id: int, user_id: int):
         'allModulesMeta': MODULE_REGISTRY
     }
 
-@router.put('/orgs/{org_id}/tasin-settings/users/{user_id}/permissions', auth=None)
+@router.put('/orgs/{org_id}/tasin-settings/users/{user_id}/permissions')
 def update_user_permissions_matrix(request, org_id: int, user_id: int, payload: UserPermissionsUpdateIn):
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
@@ -2491,7 +2475,7 @@ def update_user_permissions_matrix(request, org_id: int, user_id: int, payload: 
 
 # ─── WORKSPACE / MODULE ACCESS REQUEST SYSTEM ─────────────────────────────────
 
-@router.get('/orgs/{org_id}/access-requests', auth=None)
+@router.get('/orgs/{org_id}/access-requests')
 def list_access_requests(request, org_id: int, status: Optional[str] = None, my_only: bool = False, user_id: Optional[int] = None):
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
@@ -2500,16 +2484,12 @@ def list_access_requests(request, org_id: int, status: Optional[str] = None, my_
 
     # Non-admins can only see their own requests; admins see all organization requests
     if my_only or (not is_super_admin(actor, org) and not is_main_admin(actor, org)):
+        if not (is_super_admin(actor, org) or is_main_admin(actor, org)):
+            user_id = None  # non-admins can only ever see their own requests
         target_u = None
         if user_id:
-            User = get_user_model()
-            target_u = User.objects.filter(pk=user_id).first()
-        if not target_u and actor and actor.is_authenticated:
-            target_u = actor
-        if target_u:
-            qs = qs.filter(user=target_u)
-        else:
-            qs = qs.none()
+            target_u = get_user_model().objects.filter(pk=user_id).first()
+        qs = qs.filter(user=target_u or actor)
 
     if status and status != 'All':
         qs = qs.filter(status=status)
@@ -2557,7 +2537,7 @@ def list_access_requests(request, org_id: int, status: Optional[str] = None, my_
         })
     return out
 
-@router.get('/orgs/{org_id}/access-requests/summary', auth=None)
+@router.get('/orgs/{org_id}/access-requests/summary')
 def get_access_requests_summary(request, org_id: int):
     org = _get_org(request, org_id)
     qs = AccessRequest.objects.filter(organization=org)
@@ -2568,7 +2548,7 @@ def get_access_requests_summary(request, org_id: int):
         'rejected': qs.filter(status='Rejected').count(),
     }
 
-@router.get('/orgs/{org_id}/access-requests/{request_id}/review', auth=None)
+@router.get('/orgs/{org_id}/access-requests/{request_id}/review')
 def get_access_request_review_details(request, org_id: int, request_id: int):
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
@@ -2660,18 +2640,13 @@ def get_access_request_review_details(request, org_id: int, request_id: int):
         'past_requests': past_requests
     }
 
-@router.post('/orgs/{org_id}/access-requests', auth=None)
+@router.post('/orgs/{org_id}/access-requests')
 def create_access_request(request, org_id: int, payload: AccessRequestCreateIn):
     org = _get_org(request, org_id)
     User = get_user_model()
     target_user = None
 
-    if payload.user_id:
-        target_user = User.objects.filter(pk=payload.user_id).first()
-    elif payload.username:
-        target_user = User.objects.filter(username=payload.username.strip()).first()
-    if not target_user:
-        target_user = _resolve_actor(request, org)
+    target_user = _resolve_actor(request, org)  # a request is always made by (and for) the signed-in user
 
     if not target_user:
         raise ApiError(401, 'Authentication required to submit access request')
@@ -2729,24 +2704,10 @@ def create_access_request(request, org_id: int, payload: AccessRequestCreateIn):
         'success': True
     }
 
-@router.post('/orgs/{org_id}/access-requests/{request_id}/approve', auth=None)
+@router.post('/orgs/{org_id}/access-requests/{request_id}/approve')
 def approve_access_request(request, org_id: int, request_id: int, payload: Optional[AccessRequestApproveIn] = None):
     org = _get_org(request, org_id)
-    actor = None
-    User = get_user_model()
-    if payload and payload.reviewer_username:
-        actor = User.objects.filter(username__iexact=payload.reviewer_username.strip()).first()
-    elif payload and payload.reviewer_id:
-        actor = User.objects.filter(pk=payload.reviewer_id).first()
-    if not actor and hasattr(request, 'headers'):
-        uname_hdr = request.headers.get('X-Username')
-        uid_hdr = request.headers.get('X-User-Id')
-        if uname_hdr:
-            actor = User.objects.filter(username__iexact=uname_hdr.strip()).first()
-        elif uid_hdr:
-            actor = User.objects.filter(pk=uid_hdr).first()
-    if not actor:
-        actor = _resolve_actor(request, org)
+    actor = _resolve_actor(request, org)
 
     is_sa = is_super_admin(actor, org) or (actor and (actor.username or '').lower() in ('admin', 'superadmin', 'tasin_superadmin_test', 'sa_tasin_1', 'sa_tasin_2'))
     is_ma = is_main_admin(actor, org)
@@ -2829,24 +2790,10 @@ def approve_access_request(request, org_id: int, request_id: int, payload: Optio
         'success': True
     }
 
-@router.post('/orgs/{org_id}/access-requests/{request_id}/reject', auth=None)
+@router.post('/orgs/{org_id}/access-requests/{request_id}/reject')
 def reject_access_request(request, org_id: int, request_id: int, payload: AccessRequestRejectIn):
     org = _get_org(request, org_id)
-    actor = None
-    User = get_user_model()
-    if payload and payload.reviewer_username:
-        actor = User.objects.filter(username__iexact=payload.reviewer_username.strip()).first()
-    elif payload and payload.reviewer_id:
-        actor = User.objects.filter(pk=payload.reviewer_id).first()
-    if not actor and hasattr(request, 'headers'):
-        uname_hdr = request.headers.get('X-Username')
-        uid_hdr = request.headers.get('X-User-Id')
-        if uname_hdr:
-            actor = User.objects.filter(username__iexact=uname_hdr.strip()).first()
-        elif uid_hdr:
-            actor = User.objects.filter(pk=uid_hdr).first()
-    if not actor:
-        actor = _resolve_actor(request, org)
+    actor = _resolve_actor(request, org)
 
     is_sa = is_super_admin(actor, org) or (actor and (actor.username or '').lower() in ('admin', 'superadmin', 'tasin_superadmin_test', 'sa_tasin_1', 'sa_tasin_2'))
     is_ma = is_main_admin(actor, org)
@@ -2900,19 +2847,19 @@ def reject_access_request(request, org_id: int, request_id: int, payload: Access
 
 # ─── MODULE 14: ADVANCED REPORTING ENDPOINTS ──────────────────────────────────
 
-@router.get('/orgs/{org_id}/tasin-reports/vehicle-profitability', auth=None)
+@router.get('/orgs/{org_id}/tasin-reports/vehicle-profitability')
 def report_vehicle_profitability(request, org_id: int, start_date: Optional[str] = None, end_date: Optional[str] = None):
     org = _get_org(request, org_id)
     sd = datetime.strptime(start_date, '%Y-%m-%d').date() if start_date else None
     ed = datetime.strptime(end_date, '%Y-%m-%d').date() if end_date else None
     return calculate_vehicle_profitability(org, sd, ed)
 
-@router.get('/orgs/{org_id}/tasin-reports/document-expiries', auth=None)
+@router.get('/orgs/{org_id}/tasin-reports/document-expiries')
 def report_document_expiries(request, org_id: int, filter: Optional[str] = None):
     org = _get_org(request, org_id)
     return get_document_expiries_report(org, filter)
 
-@router.get('/orgs/{org_id}/tasin-reports/account-ledger', auth=None)
+@router.get('/orgs/{org_id}/tasin-reports/account-ledger')
 def report_account_ledger(request, org_id: int, account_id: Optional[int] = None, start_date: Optional[str] = None, end_date: Optional[str] = None):
     org = _get_org(request, org_id)
     sd = datetime.strptime(start_date, '%Y-%m-%d').date() if start_date else None
@@ -2921,20 +2868,20 @@ def report_account_ledger(request, org_id: int, account_id: Optional[int] = None
 
 # ─── RBAC: PERMISSION VERIFICATION ENDPOINT ───────────────────────────────────
 
-@router.get('/orgs/{org_id}/rbac/permissions', auth=None)
+@router.get('/orgs/{org_id}/rbac/permissions')
 def get_my_permissions(request, org_id: int, user_id: Optional[int] = None):
     org = _get_org(request, org_id)
+    actor = _resolve_actor(request, org)
     target_user = None
-    if user_id:
-        User = get_user_model()
-        target_user = User.objects.filter(pk=user_id).first()
-    if not target_user:
-        target_user = _resolve_actor(request, org)
-    return get_user_permissions_payload(target_user, org)
+    if user_id and user_id != actor.pk:
+        if not (is_super_admin(actor, org) or is_main_admin(actor, org)):
+            raise fin.FinanceError('forbidden', 'You can only view your own permissions', status=403)
+        target_user = get_user_model().objects.filter(pk=user_id).first()
+    return get_user_permissions_payload(target_user or actor, org)
 
 # ─── MODULE 04: DRIVER ATTENDANCE REGISTER ────────────────────────────────────
 
-@router.get('/orgs/{org_id}/driver-attendance', auth=None)
+@router.get('/orgs/{org_id}/driver-attendance')
 def list_driver_attendance(request, org_id: int, year: Optional[int] = None, month: Optional[int] = None):
     org = _get_org(request, org_id)
     today = date.today()
@@ -2942,7 +2889,7 @@ def list_driver_attendance(request, org_id: int, year: Optional[int] = None, mon
     m = month or today.month
     return get_driver_attendance_register(org, y, m)
 
-@router.post('/orgs/{org_id}/driver-attendance', auth=None)
+@router.post('/orgs/{org_id}/driver-attendance')
 def record_attendance(request, org_id: int, payload: AttendanceIn):
     org = _get_org(request, org_id)
     driver = Party.objects.filter(pk=payload.driver_id, organization=org).first()
@@ -2962,7 +2909,7 @@ def record_attendance(request, org_id: int, payload: AttendanceIn):
 
 # ─── MODULE 06: TRIP DISPATCH VIA SMS / WHATSAPP ─────────────────────────────
 
-@router.post('/orgs/{org_id}/duties/{duty_id}/dispatch', auth=None)
+@router.post('/orgs/{org_id}/duties/{duty_id}/dispatch')
 def dispatch_duty(request, org_id: int, duty_id: int, payload: DispatchIn):
     org = _get_org(request, org_id)
     duty = Duty.objects.filter(pk=duty_id, organization=org).first()
@@ -2970,7 +2917,7 @@ def dispatch_duty(request, org_id: int, duty_id: int, payload: DispatchIn):
         raise ApiError(404, 'Duty not found')
     return dispatch_duty_trip_sheet(duty, payload.channel)
 
-@router.get('/orgs/{org_id}/duties/{duty_id}/dispatches', auth=None)
+@router.get('/orgs/{org_id}/duties/{duty_id}/dispatches')
 def get_duty_dispatches(request, org_id: int, duty_id: int):
     org = _get_org(request, org_id)
     qs = TripDispatch.objects.filter(duty_id=duty_id).order_by('-sent_at')
@@ -2986,7 +2933,7 @@ def get_duty_dispatches(request, org_id: int, duty_id: int):
 
 # ─── MODULE 08: SPARE PARTS INVENTORY ─────────────────────────────────────────
 
-@router.get('/orgs/{org_id}/spare-parts', auth=None)
+@router.get('/orgs/{org_id}/spare-parts')
 def list_spare_parts(request, org_id: int):
     org = _get_org(request, org_id)
     qs = SparePart.objects.filter(organization=org).order_by('name')
@@ -3004,7 +2951,7 @@ def list_spare_parts(request, org_id: int):
         'notes': p.notes
     } for p in qs]
 
-@router.post('/orgs/{org_id}/spare-parts', auth=None)
+@router.post('/orgs/{org_id}/spare-parts')
 def create_or_update_spare_part(request, org_id: int, payload: SparePartIn):
     org = _get_org(request, org_id)
     p, created = SparePart.objects.update_or_create(
@@ -3023,7 +2970,7 @@ def create_or_update_spare_part(request, org_id: int, payload: SparePartIn):
     )
     return {'id': str(p.pk), 'partCode': p.part_code, 'name': p.name, 'quantity': float(p.quantity), 'success': True}
 
-@router.post('/orgs/{org_id}/spare-parts/{part_id}/consume', auth=None)
+@router.post('/orgs/{org_id}/spare-parts/{part_id}/consume')
 def consume_spare_part(request, org_id: int, part_id: int, payload: PartConsumeIn):
     org = _get_org(request, org_id)
     part = SparePart.objects.filter(pk=part_id, organization=org).first()
@@ -3053,7 +3000,7 @@ def consume_spare_part(request, org_id: int, part_id: int, payload: PartConsumeI
 
 # ─── MODULE 11: DEBTOR FOLLOW-UP MANAGEMENT ───────────────────────────────────
 
-@router.get('/orgs/{org_id}/due-followups', auth=None)
+@router.get('/orgs/{org_id}/due-followups')
 def list_due_followups(request, org_id: int, party_id: Optional[int] = None, status: Optional[str] = None):
     org = _get_org(request, org_id)
     qs = DueFollowUp.objects.filter(organization=org).select_related('party')
@@ -3074,7 +3021,7 @@ def list_due_followups(request, org_id: int, party_id: Optional[int] = None, sta
         'responsibleStaff': f.responsible_staff
     } for f in qs]
 
-@router.post('/orgs/{org_id}/due-followups', auth=None)
+@router.post('/orgs/{org_id}/due-followups')
 def create_due_followup(request, org_id: int, payload: DueFollowUpIn):
     org = _get_org(request, org_id)
     party = Party.objects.filter(pk=payload.party_id, organization=org).first()
@@ -3093,7 +3040,7 @@ def create_due_followup(request, org_id: int, payload: DueFollowUpIn):
     )
     return {'id': str(f.pk), 'success': True}
 
-@router.patch('/orgs/{org_id}/due-followups/{followup_id}', auth=None)
+@router.patch('/orgs/{org_id}/due-followups/{followup_id}')
 def update_due_followup_status(request, org_id: int, followup_id: int, status: str):
     org = _get_org(request, org_id)
     f = DueFollowUp.objects.filter(pk=followup_id, organization=org).first()
@@ -3105,7 +3052,7 @@ def update_due_followup_status(request, org_id: int, followup_id: int, status: s
 
 # ─── MODULE 14: CUSTOM REMINDERS & TO-DOS ────────────────────────────────────
 
-@router.get('/orgs/{org_id}/custom-reminders', auth=None)
+@router.get('/orgs/{org_id}/custom-reminders')
 def list_custom_reminders(request, org_id: int):
     org = _get_org(request, org_id)
     qs = CustomReminder.objects.filter(organization=org).order_by('reminder_date')
@@ -3121,7 +3068,7 @@ def list_custom_reminders(request, org_id: int):
         'status': r.status
     } for r in qs]
 
-@router.post('/orgs/{org_id}/custom-reminders', auth=None)
+@router.post('/orgs/{org_id}/custom-reminders')
 def create_custom_reminder(request, org_id: int, payload: CustomReminderIn):
     org = _get_org(request, org_id)
     r = CustomReminder.objects.create(
@@ -3137,7 +3084,7 @@ def create_custom_reminder(request, org_id: int, payload: CustomReminderIn):
     )
     return {'id': str(r.pk), 'title': r.title, 'success': True}
 
-@router.patch('/orgs/{org_id}/custom-reminders/{reminder_id}', auth=None)
+@router.patch('/orgs/{org_id}/custom-reminders/{reminder_id}')
 def update_custom_reminder(request, org_id: int, reminder_id: int, status: str):
     org = _get_org(request, org_id)
     r = CustomReminder.objects.filter(pk=reminder_id, organization=org).first()
@@ -3146,7 +3093,7 @@ def update_custom_reminder(request, org_id: int, reminder_id: int, status: str):
     r.save()
     return {'id': str(r.pk), 'status': r.status, 'success': True}
 
-@router.delete('/orgs/{org_id}/custom-reminders/{reminder_id}', auth=None)
+@router.delete('/orgs/{org_id}/custom-reminders/{reminder_id}')
 def delete_custom_reminder(request, org_id: int, reminder_id: int):
     org = _get_org(request, org_id)
     CustomReminder.objects.filter(pk=reminder_id, organization=org).delete()
@@ -3154,7 +3101,7 @@ def delete_custom_reminder(request, org_id: int, reminder_id: int):
 
 # ─── MODULE 09: AGREEMENT RENEWAL WORKFLOW ───────────────────────────────────
 
-@router.post('/orgs/{org_id}/agreements/{agreement_id}/renew', auth=None)
+@router.post('/orgs/{org_id}/agreements/{agreement_id}/renew')
 def renew_agreement_endpoint(request, org_id: int, agreement_id: int, payload: RenewAgreementIn):
     org = _get_org(request, org_id)
     agreement = Agreement.objects.filter(pk=agreement_id, organization=org).first()
@@ -3164,7 +3111,7 @@ def renew_agreement_endpoint(request, org_id: int, agreement_id: int, payload: R
 
 # ─── MODULE 10: BANK RECONCILIATION ──────────────────────────────────────────
 
-@router.post('/orgs/{org_id}/bank-reconciliation/match', auth=None)
+@router.post('/orgs/{org_id}/bank-reconciliation/match')
 def match_bank_statement(request, org_id: int, payload: BankReconIn):
     org = _get_org(request, org_id)
     rows_data = [r.dict() for r in payload.rows]
@@ -3172,14 +3119,14 @@ def match_bank_statement(request, org_id: int, payload: BankReconIn):
 
 # ─── MODULE 13: AD-HOC CUSTOM REPORT BUILDER ─────────────────────────────────
 
-@router.post('/orgs/{org_id}/reports/custom-builder', auth=None)
+@router.post('/orgs/{org_id}/reports/custom-builder')
 def custom_report_builder_endpoint(request, org_id: int, payload: CustomReportIn):
     org = _get_org(request, org_id)
     return build_custom_report(org, payload.module, payload.fields, payload.start_date, payload.end_date, payload.status_filter)
 
 # ─── MODULE 15: SECURE DATABASE BACKUP GENERATION ────────────────────────────
 
-@router.get('/orgs/{org_id}/backup/download', auth=None)
+@router.get('/orgs/{org_id}/backup/download')
 def download_database_backup(request, org_id: int):
     org = _get_org(request, org_id)
     backup_json = generate_organization_backup(org)
@@ -3191,7 +3138,7 @@ def download_database_backup(request, org_id: int):
 
 # ─── DOCUMENT UPLOADS & FILE STORAGE ─────────────────────────────────────────
 
-@router.post('/orgs/{org_id}/documents/upload', auth=None)
+@router.post('/orgs/{org_id}/documents/upload')
 def upload_private_document(request, org_id: int, payload: DocumentUploadIn):
     import base64
     import os
@@ -3233,7 +3180,7 @@ def upload_private_document(request, org_id: int, payload: DocumentUploadIn):
         'success': True
     }
 
-@router.get('/orgs/{org_id}/documents', auth=None)
+@router.get('/orgs/{org_id}/documents')
 def list_private_documents(request, org_id: int, entity_type: str, entity_id: str):
     org = _get_org(request, org_id)
     qs = PrivateDocument.objects.filter(organization=org, entity_type=entity_type, entity_id=entity_id)

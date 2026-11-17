@@ -134,6 +134,8 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
 
 # ─── CORE USER ROLES & PERMISSIONS RESOLUTION ────────────────────────────────
 
+RESERVED_SUPER_ADMIN_USERNAMES = ('admin', 'superadmin', 'tasin_superadmin_test', 'sa_tasin_1', 'sa_tasin_2')
+
 def is_super_admin(user, org: Optional[Organization] = None) -> bool:
     """Super Admin is the highest authority and is never restricted."""
     if not user:
@@ -148,11 +150,11 @@ def is_super_admin(user, org: Optional[Organization] = None) -> bool:
     # 3. Organization-level membership with super admin role
     if org:
         m = Membership.objects.filter(user=user, organization=org).first()
-        if m and (m.role or '').lower() in ('super_admin', 'superadmin', 'owner'):
+        if m and (m.role or '').lower() in ('super_admin', 'superadmin'):
             return True
-    # 4. Any organization membership with super admin role
-    if hasattr(user, 'pk') and user.pk:
-        if Membership.objects.filter(user=user, role__in=['super_admin', 'superadmin', 'owner']).exists():
+    # 4. Without an organization context only: any membership with the super admin role
+    elif hasattr(user, 'pk') and user.pk:
+        if Membership.objects.filter(user=user, role__in=['super_admin', 'superadmin']).exists():
             return True
     return False
 
@@ -169,7 +171,7 @@ def is_main_admin(user, org: Optional[Organization] = None) -> bool:
     if org:
         m_qs = m_qs.filter(organization=org)
     m = m_qs.first()
-    if m and (m.role or '').lower() in ('admin', 'administrator', 'super_admin', 'superadmin', 'owner'):
+    if m and (m.role or '').lower() in ('admin', 'administrator', 'super_admin', 'superadmin'):
         return True
     if hasattr(user, 'tasin_profile') and (getattr(user.tasin_profile, 'is_main_admin', False) or getattr(user.tasin_profile, 'can_approve_requests', False)):
         return True
@@ -189,7 +191,7 @@ def get_user_role(user, org: Organization) -> str:
         r = (m.role or 'staff').lower().replace('-', '_').replace(' ', '_')
         if r in ROLES.values():
             return r
-        if r in ('owner', 'superadmin'):
+        if r in ('superadmin',):
             return 'super_admin'
         if r == 'admin':
             return 'admin'

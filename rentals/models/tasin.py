@@ -147,7 +147,7 @@ class MaintenanceRecord(models.Model):
         ('Engine', 'Engine'), ('Gearbox', 'Gearbox'), ('Suspension', 'Suspension'),
         ('Brake', 'Brake'), ('Electrical', 'Electrical'), ('AC', 'AC'),
         ('Tyre', 'Tyre'), ('Battery', 'Battery'), ('Oil Change', 'Oil Change'),
-        ('General Service', 'General Service'), ('Other', 'Other')
+        ('General Service', 'General Service'), ('Other', 'Other'), ('Custom', 'Custom')
     ]
     organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='tasin_maintenance_records')
     maintenance_id = models.CharField(max_length=32, db_index=True) # e.g. MNT-001
@@ -158,6 +158,7 @@ class MaintenanceRecord(models.Model):
     date = models.DateField()
     problem_description = models.TextField()
     service_type = models.CharField(max_length=40, choices=CATEGORY_CHOICES, default='General Service')
+    custom_purpose = models.CharField(max_length=120, blank=True, default='')  # user-typed purpose when service_type == 'Custom'
     parts_details = models.TextField(blank=True, default='')
     labour_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     parts_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -177,12 +178,14 @@ class VehiclePaper(models.Model):
     organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='papers')
     vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE, related_name='papers')
     paper_type = models.CharField(max_length=40, choices=PAPER_TYPE_CHOICES)
+    title = models.CharField(max_length=200, blank=True, default='')
     paper_number = models.CharField(max_length=80, blank=True, default='')
     issue_date = models.DateField(null=True, blank=True)
     expiry_date = models.DateField(null=True, blank=True)
     status = models.CharField(max_length=20, default='Valid') # Valid, Expiring Soon, Expired
     document_url = models.CharField(max_length=255, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
 class FinancialAccount(models.Model):
     """Cash & Bank Accounts Management (Module 10)."""
@@ -216,10 +219,17 @@ class AccountTransaction(models.Model):
     description = models.TextField(blank=True, default='')
     from_account = models.ForeignKey(FinancialAccount, null=True, blank=True, on_delete=models.SET_NULL, related_name='outgoing_transfers')
     to_account = models.ForeignKey(FinancialAccount, null=True, blank=True, on_delete=models.SET_NULL, related_name='incoming_transfers')
+    custom_title = models.CharField(max_length=160, blank=True, default='')  # user-entered title when category == 'Custom'
+    idempotency_key = models.CharField(max_length=120, null=True, blank=True)
+    source = models.CharField(max_length=40, blank=True, default='')  # e.g. salary_payment, vehicle_payment, custom
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['-date', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['organization', 'idempotency_key'], condition=models.Q(idempotency_key__isnull=False), name='uniq_account_txn_idem'),
+        ]
 
 class SystemAlert(models.Model):
     """Notifications & Alerts (Module 14)."""
