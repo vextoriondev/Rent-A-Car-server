@@ -37,8 +37,14 @@ def csrf_cookie(request):
 
 @router.post('/auth/login',auth=None)
 def login_view(request,payload:LoginIn):
-    user=authenticate(request,username=payload.username.strip(),password=payload.password)
-    if not user:raise ApiError(401, 'incorrect_username_or_password')
+    from ..services import throttle
+    username=payload.username.strip()
+    throttle.check_not_locked(request,username)
+    user=authenticate(request,username=username,password=payload.password)
+    if not user:
+        throttle.record_failure(request,username)
+        raise ApiError(401, 'incorrect_username_or_password')
+    throttle.record_success(request,username)
     auth_login(request,user)
     return {'user_id':user.pk,'username':user.get_username()}
 

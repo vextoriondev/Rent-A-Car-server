@@ -134,6 +134,8 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
 
 # ─── CORE USER ROLES & PERMISSIONS RESOLUTION ────────────────────────────────
 
+from django.db.models import Q as models_Q
+
 RESERVED_SUPER_ADMIN_USERNAMES = ('admin', 'superadmin', 'tasin_superadmin_test', 'sa_tasin_1', 'sa_tasin_2')
 
 def is_super_admin(user, org: Optional[Organization] = None) -> bool:
@@ -143,18 +145,16 @@ def is_super_admin(user, org: Optional[Organization] = None) -> bool:
     # 1. System superuser flag
     if getattr(user, 'is_superuser', False):
         return True
-    # 2. Canonical administrator usernames
-    uname = (getattr(user, 'username', '') or '').lower()
-    if uname in ('admin', 'superadmin', 'tasin_superadmin_test', 'sa_tasin_1', 'sa_tasin_2'):
-        return True
+    # 2. (removed) Super Admin is never inferred from a username. It is either the global Django superuser flag above
+    #    (a separate, explicit, platform-level role) or an organization-scoped `super_admin` membership role below.
     # 3. Organization-level membership with super admin role
     if org:
         m = Membership.objects.filter(user=user, organization=org).first()
-        if m and (m.role or '').lower() in ('super_admin', 'superadmin'):
+        if m and (m.is_super_admin or (m.role or '').lower() in ('super_admin', 'superadmin')):
             return True
-    # 4. Without an organization context only: any membership with the super admin role
+    # 4. Without an organization context only: any membership with the explicit flag / legacy role
     elif hasattr(user, 'pk') and user.pk:
-        if Membership.objects.filter(user=user, role__in=['super_admin', 'superadmin']).exists():
+        if Membership.objects.filter(user=user).filter(models_Q(is_super_admin=True) | models_Q(role__in=['super_admin', 'superadmin'])).exists():
             return True
     return False
 
@@ -163,9 +163,6 @@ def is_main_admin(user, org: Optional[Organization] = None) -> bool:
     if not user:
         return False
     if is_super_admin(user, org):
-        return True
-    uname = (getattr(user, 'username', '') or '').lower()
-    if uname in ('admin', 'superadmin', 'tasin_superadmin_test', 'sa_tasin_1', 'sa_tasin_2'):
         return True
     m_qs = Membership.objects.filter(user=user)
     if org:

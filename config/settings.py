@@ -69,6 +69,7 @@ import sys
 if 'test' in sys.argv: PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']  # tests only: fast hashing
 
 # Private document storage: never served directly; only through signed, user-bound, short-lived URLs (rentals.services.documents).
+DATA_UPLOAD_MAX_MEMORY_SIZE = 8 * 1024 * 1024   # request bodies (base64 document uploads are capped at 5 MB of file data)
 PRIVATE_MEDIA_ROOT = Path(os.environ.get('PRIVATE_MEDIA_ROOT') or BASE_DIR / 'private_media')   # on Railway: a mounted volume, so uploads survive a redeploy
 DOCUMENT_URL_MAX_AGE = int(os.environ.get('DOCUMENT_URL_MAX_AGE','300'))
 

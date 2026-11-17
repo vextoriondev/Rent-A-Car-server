@@ -64,7 +64,7 @@ class FuelGasIn(Schema):
     amount: Decimal
     date: Date
     vehicle_id: Optional[int] = None
-    direction: str = 'driver_owes'
+    direction: Optional[str] = None
     payment_method: str = 'Cash'
     reference: str = ''
     description: str = ''
@@ -79,7 +79,7 @@ class SalaryPaymentIn(Schema):
     advance_adjustment: Decimal = D(0)
     fuel_gas_settlement: Decimal = D(0)
     fuel_gas_mode: str = 'none'
-    fuel_gas_direction: str = 'driver_owes'
+    fuel_gas_direction: Optional[str] = None
     amount_paid: Optional[Decimal] = None
 
 
@@ -581,3 +581,104 @@ def vehicle_billing(request, org_id: int, vehicle_id: int, month: Optional[str] 
     if not vehicle:
         raise fin.FinanceError('not_found', 'Record not found', status=404)
     return fin.vehicle_billing(org, vehicle, month)
+
+
+# ─── garage payables ───────────────────────────────────────────────────────
+
+class GaragePaymentIn(Schema):
+    amount: Decimal
+    date: Date
+    payment_method: str = 'Cash'
+    reference: str = ''
+    note: str = ''
+    vehicle_id: Optional[int] = None
+
+
+@router.get('/orgs/{org_id}/garages/{garage_id}/statement')
+def garage_statement(request, org_id: int, garage_id: int, date_from: Optional[Date] = None, date_to: Optional[Date] = None):
+    org, user = _ctx(request, org_id, 'maintenance', 'view')
+    from ..models import Garage
+    from ..services import garage as gsvc
+    g = Garage.objects.filter(pk=garage_id, organization=org).first()
+    if not g:
+        raise fin.FinanceError('not_found', 'Garage not found', status=404)
+    return gsvc.garage_statement(org, g, date_from, date_to)
+
+
+@router.post('/orgs/{org_id}/garages/{garage_id}/payments')
+def garage_payment(request, org_id: int, garage_id: int, payload: GaragePaymentIn, idem: Optional[str] = Header(None, alias='Idempotency-Key')):
+    org, user = _ctx(request, org_id, 'maintenance', 'create')
+    from ..services import garage as gsvc
+    vehicle = Vehicle.objects.filter(pk=payload.vehicle_id, organization=org).first() if payload.vehicle_id else None
+    if payload.vehicle_id and not vehicle:
+        raise fin.FinanceError('not_found', 'Vehicle not found', status=404)
+    e, outstanding, replayed = gsvc.pay_garage(org, garage_id, user, payload.amount, payload.date, payload.payment_method, payload.reference, payload.note, vehicle, idem)
+    return {'success': True, 'replayed': replayed, 'entryId': e.pk, 'outstanding': fin.S(outstanding)}
+
+
+@router.post('/orgs/{org_id}/garage-payments/{entry_id}/reverse')
+def garage_payment_reverse(request, org_id: int, entry_id: int, payload: ReverseIn):
+    org, user = _ctx(request, org_id, 'maintenance', 'approve')
+    from ..services import garage as gsvc
+    gsvc.reverse_garage_payment(org, entry_id, user, payload.reason)
+    return {'success': True}
+
+
+# ─── finance settings (rent proration, fuel/gas policy) ─────────────────────
+
+class FinanceSettingsIn(Schema):
+    rent_proration: Optional[str] = None
+    fuel_default_direction: Optional[str] = None
+    fuel_default_settlement: Optional[str] = None
+
+
+def _settings_out(fs):
+    return {'rentProration': fs.rent_proration, 'fuelDefaultDirection': fs.fuel_default_direction, 'fuelDefaultSettlement': fs.fuel_default_settlement,
+            'updatedAt': fs.updated_at.isoformat(), 'updatedBy': fs.updated_by.get_username() if fs.updated_by_id else '',
+            'provisional': True,
+            'note': 'Provisional policy pending client confirmation. Changing it never recalculates already-posted rent or settlements.'}
+
+
+@router.get('/orgs/{org_id}/finance-settings')
+def get_settings(request, org_id: int):
+    org, user = _ctx(request, org_id, 'settings', 'view')
+    return _settings_out(fin.get_finance_settings(org))
+
+
+@router.put('/orgs/{org_id}/finance-settings')
+def put_settings(request, org_id: int, payload: FinanceSettingsIn):
+    org, user = _ctx(request, org_id, 'settings', 'edit')
+    return _settings_out(fin.update_finance_settings(org, user, payload.rent_proration, payload.fuel_default_direction, payload.fuel_default_settlement))
+
+
+# ─── owner additional charges, issue reversal, expense summary ──────────────
+
+class OwnerChargeIn(Schema):
+    amount: Decimal
+    date: Date
+    description: str
+    vehicle_id: Optional[int] = None
+    reference: str = ''
+
+
+@router.post('/orgs/{org_id}/owners/{owner_id}/charges')
+def owner_charge(request, org_id: int, owner_id: int, payload: OwnerChargeIn, idem: Optional[str] = Header(None, alias='Idempotency-Key')):
+    org, user = _ctx(request, org_id, 'owners', 'create')
+    vehicle = Vehicle.objects.filter(pk=payload.vehicle_id, organization=org, owner_id=owner_id).first() if payload.vehicle_id else None
+    if payload.vehicle_id and not vehicle:
+        raise fin.FinanceError('not_found', 'Vehicle not found for this owner', status=404)
+    e, replayed = fin.owner_charge(org, owner_id, user, payload.amount, payload.date, payload.description, vehicle, payload.reference, idem)
+    return {'success': True, 'replayed': replayed, 'entryId': e.pk}
+
+
+@router.post('/orgs/{org_id}/ledger-entries/{entry_id}/reverse')
+def reverse_issue(request, org_id: int, entry_id: int, payload: ReverseIn):
+    org, user = _ctx(request, org_id, 'drivers', 'approve')
+    rev = fin.reverse_issue_entry(org, entry_id, user, payload.reason)
+    return {'success': True, 'reversalId': rev.pk}
+
+
+@router.get('/orgs/{org_id}/expense-summary')
+def expense_summary(request, org_id: int, date_from: Optional[Date] = None, date_to: Optional[Date] = None, category: str = '', vehicle_reg: str = ''):
+    org, user = _ctx(request, org_id, 'expenses', 'view')
+    return fin.expense_summary(org, date_from, date_to, category or None, vehicle_reg or None)

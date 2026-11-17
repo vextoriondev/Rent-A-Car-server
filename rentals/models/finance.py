@@ -118,6 +118,10 @@ class RentAccrual(models.Model):
     amount = models.DecimalField(max_digits=14, decimal_places=2)
     status = models.CharField(max_length=10, default='posted')  # posted | reversed
     reversal_reason = models.CharField(max_length=240, blank=True)
+    monthly_rate = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    proration_basis = models.CharField(max_length=16, default='full_month')
+    days_charged = models.PositiveSmallIntegerField(default=0)
+    days_in_basis = models.PositiveSmallIntegerField(default=0)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
 

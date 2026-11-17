@@ -29,6 +29,7 @@ from ..services.tasin import (
 )
 from ..services import finance as fin
 from .tasin_auth import tasin_auth
+from ..services import garage as garage_svc
 from ..rbac import (
     get_user_permissions_payload, get_user_role, check_permission,
     is_super_admin, is_main_admin, can_admin_grant_permission,
@@ -872,7 +873,7 @@ def pay_driver(request, org_id: int, driver_id: int, payload: PaymentActionIn):
         fin.ensure_salary_accrual(org, d, on_date, actor)
         bal = fin.balance(d, fin.A.DRIVER_SALARY)
         if amount > bal:
-            raise ApiError(422, fin.FinanceError('exceeds_balance', f'Payment (৳{amount}) exceeds the salary due (৳{bal})'))
+            raise fin.FinanceError('exceeds_balance', f'Payment (৳{amount}) exceeds the salary due (৳{bal})')
         fin.post_entry(org, d, fin.A.DRIVER_SALARY, fin.T.PAYMENT, -amount, on_date, actor, payment_method=payload.payment_method,
                        reference=payload.reference, description=payload.note or 'Salary payout', source_type='salary_payout')
         fin._post_account_txn(org, actor, on_date, 'Expense', 'Driver Salary', d.name, amount, payload.payment_method, payload.reference,
@@ -1428,6 +1429,11 @@ def list_daily_expenses(request, org_id: int, date_val: str | None = None, categ
 @router.post('/orgs/{org_id}/tasin-expenses')
 def record_daily_expense(request, org_id: int, payload: ExpenseInCustom):
     org = _get_org(request, org_id)
+    fin.money(payload.amount, field='Expense amount')
+    if not payload.category.strip():
+        raise fin.FinanceError('category_required', 'Expense category is required')
+    if payload.vehicle_reg and not Vehicle.objects.filter(organization=org, registration=payload.vehicle_reg.strip()).exists():
+        raise fin.FinanceError('vehicle_not_found', 'Related vehicle was not found')
     if payload.reference and payload.reference.strip():
         dup = AccountTransaction.objects.filter(organization=org, reference=payload.reference.strip()).first()
         if dup:
@@ -1487,25 +1493,10 @@ def create_garage(request, org_id: int, payload: GarageIn):
 @router.post('/orgs/{org_id}/tasin-garages/{garage_id}/payments')
 def record_garage_payment(request, org_id: int, garage_id: int, payload: PaymentActionIn):
     org = _get_org(request, org_id)
-    g = Garage.objects.filter(pk=garage_id, organization=org).first()
-    if not g: raise ApiError(404, 'Garage not found')
-    with transaction.atomic():
-        g.total_paid += payload.amount
-        g.save()
-        count = AccountTransaction.objects.filter(organization=org).count() + 1
-        AccountTransaction.objects.create(
-            organization=org,
-            transaction_id=f'EXP-G-{count:03d}',
-            date=payload.date or date.today(),
-            transaction_type='Expense',
-            category='Garage Bill',
-            related_person=g.name,
-            amount=payload.amount,
-            payment_method=payload.payment_method,
-            reference=payload.reference,
-            description=f'Payment to garage {g.name}: {payload.note}'
-        )
-    return {'success': True, 'garage': g.name, 'amountPaid': float(payload.amount), 'remainingDue': float(g.total_bill - g.total_paid)}
+    entry, outstanding, _ = garage_svc.pay_garage(org, garage_id, _resolve_actor(request, org), payload.amount, payload.date or date.today(),
+                                                   payload.payment_method, payload.reference, payload.note)
+    g = Garage.objects.get(pk=garage_id)
+    return {'success': True, 'garage': g.name, 'amountPaid': float(payload.amount), 'remainingDue': float(outstanding)}
 
 @router.delete('/orgs/{org_id}/tasin-garages/{garage_id}')
 def delete_garage(request, org_id: int, garage_id: int):
@@ -1516,15 +1507,19 @@ def delete_garage(request, org_id: int, garage_id: int):
     g.save()
     return {'id': str(g.pk), 'status': 'Inactive', 'success': True}
 
+def _check_costs(payload):
+    if payload.labour_cost < 0 or payload.parts_cost < 0:
+        raise fin.FinanceError('invalid_amount', 'Costs cannot be negative')
+
 def _clean_purpose(payload):
     '''Custom purpose: required (and trimmed) when service_type is 'Custom'; ignored otherwise.'''
     if payload.service_type != 'Custom':
         return ''
     purpose = ' '.join((payload.custom_purpose or '').split())
     if not purpose:
-        raise ApiError(422, fin.FinanceError('purpose_required', 'Enter the custom maintenance purpose'))
+        raise fin.FinanceError('purpose_required', 'Enter the custom maintenance purpose')
     if len(purpose) > 120:
-        raise ApiError(422, fin.FinanceError('purpose_too_long', 'Custom purpose must be 120 characters or fewer'))
+        raise fin.FinanceError('purpose_too_long', 'Custom purpose must be 120 characters or fewer')
     return purpose
 
 @router.get('/orgs/{org_id}/tasin-maintenance')
@@ -1554,6 +1549,7 @@ def list_maintenance(request, org_id: int):
 def create_maintenance(request, org_id: int, payload: MaintenanceIn):
     org = _get_org(request, org_id)
     custom_purpose = _clean_purpose(payload)
+    _check_costs(payload)
     total = payload.labour_cost + payload.parts_cost
     count = MaintenanceRecord.objects.filter(organization=org).count() + 1
     m = MaintenanceRecord.objects.create(
@@ -1574,11 +1570,12 @@ def create_maintenance(request, org_id: int, payload: MaintenanceIn):
         actual_delivery=payload.actual_delivery,
         status=payload.status
     )
-    # Update garage bill
+    # Garage payable: an auditable ledger bill (the Garage.total_bill counter is rewritten from the ledger)
     g = Garage.objects.filter(organization=org, name=payload.garage_name.strip()).first()
     if g:
-        g.total_bill += total
-        g.save()
+        with transaction.atomic():
+            garage_svc.lock_garage(org, g.pk)
+            garage_svc.bill_for_maintenance(org, g, m, _resolve_actor(request, org))
     # Update vehicle status and mobil count if applicable
     v = Vehicle.objects.filter(organization=org, registration=payload.vehicle_reg.strip()).first()
     if v:
@@ -1599,7 +1596,9 @@ def update_maintenance(request, org_id: int, mnt_id: int, payload: MaintenanceIn
     m = MaintenanceRecord.objects.filter(pk=mnt_id, organization=org).first()
     if not m: raise ApiError(404, 'Maintenance record not found')
     custom_purpose = _clean_purpose(payload)
+    _check_costs(payload)
     old_total = m.total_cost
+    old_garage_name = m.garage_name
     new_total = payload.labour_cost + payload.parts_cost
 
     m.vehicle_reg = payload.vehicle_reg.strip()
@@ -1618,11 +1617,21 @@ def update_maintenance(request, org_id: int, mnt_id: int, payload: MaintenanceIn
     m.status = payload.status
     m.save()
 
-    # Adjust garage bill
+    # Adjust garage payable through the ledger (a changed garage moves the bill from the old garage to the new one)
+    actor = _resolve_actor(request, org)
     g = Garage.objects.filter(organization=org, name=payload.garage_name.strip()).first()
-    if g:
-        g.total_bill += (new_total - old_total)
-        g.save()
+    old_g = Garage.objects.filter(organization=org, name=old_garage_name).first()
+    with transaction.atomic():
+        if old_g and g and old_g.pk != g.pk:
+            garage_svc.lock_garage(org, old_g.pk)
+            m.total_cost = old_total
+            garage_svc.cancel_maintenance_bill(org, old_g, m, actor)
+            m.total_cost = new_total
+            garage_svc.lock_garage(org, g.pk)
+            garage_svc.bill_for_maintenance(org, g, m, actor)
+        elif g and new_total != old_total:
+            garage_svc.lock_garage(org, g.pk)
+            garage_svc.adjust_for_maintenance(org, g, m, old_total, actor)
 
     # Update vehicle status and mobil count if applicable
     v = Vehicle.objects.filter(organization=org, registration=payload.vehicle_reg.strip()).first()
@@ -1645,8 +1654,9 @@ def delete_maintenance(request, org_id: int, mnt_id: int):
     if not m: raise ApiError(404, 'Maintenance record not found')
     g = Garage.objects.filter(organization=org, name=m.garage_name).first()
     if g:
-        g.total_bill = max(D(0), g.total_bill - m.total_cost)
-        g.save()
+        with transaction.atomic():
+            garage_svc.lock_garage(org, g.pk)
+            garage_svc.cancel_maintenance_bill(org, g, m, _resolve_actor(request, org))
     v = Vehicle.objects.filter(organization=org, registration=m.vehicle_reg).first()
     if v:
         det = getattr(v, 'detail', None)
@@ -2023,13 +2033,13 @@ def list_system_users(request, org_id: int):
             user=u,
             defaults={
                 'organization': org,
-                'designation': 'Administrator' if u.is_superuser else 'Operations Staff',
-                'department': 'Executive' if u.is_superuser else 'Operations',
+                'designation': 'Administrator' if is_super_admin(u, org) else 'Operations Staff',
+                'department': 'Executive' if is_super_admin(u, org) else 'Operations',
                 'status': 'Active' if u.is_active else 'Inactive',
-                'is_main_admin': (m.role == 'admin' and not u.is_superuser)
+                'is_main_admin': (m.role == 'admin' and not is_super_admin(u, org))
             }
         )
-        mod_count = len(ALL_MODULE_KEYS) if u.is_superuser else UserModulePermission.objects.filter(organization=org, user=u, can_view=True).count()
+        mod_count = len(ALL_MODULE_KEYS) if is_super_admin(u, org) else UserModulePermission.objects.filter(organization=org, user=u, can_view=True).count()
 
         users_list.append({
             'id': str(u.pk),
@@ -2037,7 +2047,7 @@ def list_system_users(request, org_id: int):
             'name': u.get_full_name() or u.username,
             'email': u.email,
             'role': m.role,
-            'isSuperAdmin': bool(u.is_superuser),
+            'isSuperAdmin': bool(is_super_admin(u, org)),
             'isMainAdmin': bool(profile.is_main_admin),
             'isActive': u.is_active,
             'phone': profile.phone,
@@ -2045,8 +2055,8 @@ def list_system_users(request, org_id: int):
             'department': profile.department,
             'employeeId': profile.employee_id,
             'status': profile.status,
-            'canManageUsers': bool(profile.can_manage_users or u.is_superuser or profile.is_main_admin),
-            'canApproveRequests': bool(profile.can_approve_requests or u.is_superuser or profile.is_main_admin),
+            'canManageUsers': bool(profile.can_manage_users or is_super_admin(u, org) or profile.is_main_admin),
+            'canApproveRequests': bool(profile.can_approve_requests or is_super_admin(u, org) or profile.is_main_admin),
             'modulesCount': mod_count,
             'dateJoined': u.date_joined.isoformat() if hasattr(u, 'date_joined') and u.date_joined else ''
         })
@@ -2059,19 +2069,19 @@ def list_system_users(request, org_id: int):
             user=u,
             defaults={
                 'organization': org,
-                'designation': 'Super Administrator' if u.is_superuser else 'Operations Staff',
-                'department': 'Executive' if u.is_superuser else 'Operations',
+                'designation': 'Super Administrator' if is_super_admin(u, org) else 'Operations Staff',
+                'department': 'Executive' if is_super_admin(u, org) else 'Operations',
                 'status': 'Active' if u.is_active else 'Inactive',
             }
         )
-        mod_count = len(ALL_MODULE_KEYS) if u.is_superuser else UserModulePermission.objects.filter(organization=org, user=u, can_view=True).count()
+        mod_count = len(ALL_MODULE_KEYS) if is_super_admin(u, org) else UserModulePermission.objects.filter(organization=org, user=u, can_view=True).count()
         users_list.append({
             'id': str(u.pk),
             'username': u.username,
             'name': u.get_full_name() or u.username,
             'email': u.email,
-            'role': 'super_admin' if u.is_superuser else 'staff',
-            'isSuperAdmin': bool(u.is_superuser),
+            'role': 'super_admin' if is_super_admin(u, org) else 'staff',
+            'isSuperAdmin': bool(is_super_admin(u, org)),
             'isMainAdmin': bool(profile.is_main_admin),
             'isActive': u.is_active,
             'phone': profile.phone,
@@ -2079,8 +2089,8 @@ def list_system_users(request, org_id: int):
             'department': profile.department,
             'employeeId': profile.employee_id,
             'status': profile.status,
-            'canManageUsers': bool(u.is_superuser or profile.is_main_admin),
-            'canApproveRequests': bool(u.is_superuser or profile.is_main_admin),
+            'canManageUsers': bool(is_super_admin(u, org) or profile.is_main_admin),
+            'canApproveRequests': bool(is_super_admin(u, org) or profile.is_main_admin),
             'modulesCount': mod_count,
             'dateJoined': u.date_joined.isoformat() if hasattr(u, 'date_joined') and u.date_joined else ''
         })
@@ -2116,16 +2126,15 @@ def create_system_user(request, org_id: int, payload: UserCreateIn):
                 user.last_name = parts[1]
             user.save()
 
-        if payload.role == 'super_admin':
-            user.is_superuser = True
-            user.is_staff = True
-            user.save()
-
         Membership.objects.create(
             organization=org,
             user=user,
-            role=payload.role
+            role='admin' if payload.role == 'super_admin' else payload.role,
+            is_super_admin=(payload.role == 'super_admin')
         )
+        if payload.role == 'super_admin':
+            from ..services.audit import audit as _audit
+            _audit(org, actor, 'privilege.assign', 'user', user.pk, after={'role': 'super_admin', 'username': user.username})
 
         profile, _ = UserProfile.objects.get_or_create(
             user=user,
@@ -2251,17 +2260,24 @@ def update_user_profile(request, org_id: int, user_id: int, payload: UserProfile
         if payload.email is not None:
             target_user.email = payload.email.strip()
         if payload.role is not None:
-            if payload.role == 'super_admin':
-                target_user.is_superuser = True
-                target_user.is_staff = True
-            elif target_user.is_superuser and is_super_admin(actor, org):
-                target_user.is_superuser = False
+            from ..services.audit import audit as _audit
             m = Membership.objects.filter(organization=org, user=target_user).first()
+            was_super = bool(m and (m.is_super_admin or (m.role or '').lower() in ('super_admin', 'superadmin')))
+            want_super = payload.role == 'super_admin'
+            if was_super and not want_super:
+                others = Membership.objects.filter(organization=org).filter(Q(is_super_admin=True) | Q(role__in=['super_admin', 'superadmin'])).exclude(user=target_user).count()
+                if others == 0 and not get_user_model().objects.filter(is_superuser=True, is_active=True).exclude(pk=target_user.pk).exists():
+                    raise fin.FinanceError('last_super_admin', 'Cannot remove the last Super Admin', status=409)
+            new_role = 'admin' if want_super else payload.role
             if m:
-                m.role = payload.role
+                m.role, m.is_super_admin = new_role, want_super
                 m.save()
             else:
-                Membership.objects.create(organization=org, user=target_user, role=payload.role)
+                Membership.objects.create(organization=org, user=target_user, role=new_role, is_super_admin=want_super)
+            if want_super and not was_super:
+                _audit(org, actor, 'privilege.assign', 'user', target_user.pk, after={'role': 'super_admin', 'username': target_user.username})
+            elif was_super and not want_super:
+                _audit(org, actor, 'privilege.remove', 'user', target_user.pk, before={'role': 'super_admin'}, after={'role': payload.role})
         target_user.save()
 
         profile, _ = UserProfile.objects.get_or_create(user=target_user, defaults={'organization': org})
@@ -2552,7 +2568,7 @@ def get_access_requests_summary(request, org_id: int):
 def get_access_request_review_details(request, org_id: int, request_id: int):
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
-    is_sa = is_super_admin(actor, org) or (actor and (actor.username or '').lower() in ('admin', 'superadmin', 'tasin_superadmin_test', 'sa_tasin_1', 'sa_tasin_2'))
+    is_sa = is_super_admin(actor, org)
     is_ma = is_main_admin(actor, org)
     if not is_sa and not is_ma:
         raise ApiError(403, 'Permission denied: only administrators can review access requests')
@@ -2709,7 +2725,7 @@ def approve_access_request(request, org_id: int, request_id: int, payload: Optio
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
 
-    is_sa = is_super_admin(actor, org) or (actor and (actor.username or '').lower() in ('admin', 'superadmin', 'tasin_superadmin_test', 'sa_tasin_1', 'sa_tasin_2'))
+    is_sa = is_super_admin(actor, org)
     is_ma = is_main_admin(actor, org)
 
     if not is_sa and not is_ma:
@@ -2795,7 +2811,7 @@ def reject_access_request(request, org_id: int, request_id: int, payload: Access
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
 
-    is_sa = is_super_admin(actor, org) or (actor and (actor.username or '').lower() in ('admin', 'superadmin', 'tasin_superadmin_test', 'sa_tasin_1', 'sa_tasin_2'))
+    is_sa = is_super_admin(actor, org)
     is_ma = is_main_admin(actor, org)
 
     if not is_sa and not is_ma:
@@ -3119,7 +3135,7 @@ def match_bank_statement(request, org_id: int, payload: BankReconIn):
 
 # ─── MODULE 13: AD-HOC CUSTOM REPORT BUILDER ─────────────────────────────────
 
-@router.post('/orgs/{org_id}/reports/custom-builder')
+@router.post('/orgs/{org_id}/custom-report-builder')
 def custom_report_builder_endpoint(request, org_id: int, payload: CustomReportIn):
     org = _get_org(request, org_id)
     return build_custom_report(org, payload.module, payload.fields, payload.start_date, payload.end_date, payload.status_filter)
@@ -3138,52 +3154,57 @@ def download_database_backup(request, org_id: int):
 
 # ─── DOCUMENT UPLOADS & FILE STORAGE ─────────────────────────────────────────
 
-@router.post('/orgs/{org_id}/documents/upload')
+PRIVATE_ENTITY_TYPES = {'owner', 'driver', 'vehicle', 'client', 'maintenance', 'expense', 'transaction', 'agreement', 'company'}
+ALLOWED_UPLOADS = {  # mime -> (extension, leading magic bytes)
+    'application/pdf': ('pdf', (b'%PDF',)),
+    'image/png': ('png', (b'\x89PNG',)),
+    'image/jpeg': ('jpg', (b'\xff\xd8\xff',)),
+}
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+
+
+@router.post('/orgs/{org_id}/private-documents/upload')
 def upload_private_document(request, org_id: int, payload: DocumentUploadIn):
+    """Secure private upload: entity type allow-list, size cap, mime + magic-byte check, server-generated file name (no client path)."""
     import base64
     import os
+    import uuid
     from django.conf import settings
     org = _get_org(request, org_id)
-    
-    # Decode base64
+    entity_type = payload.entity_type.strip().lower()
+    if entity_type not in PRIVATE_ENTITY_TYPES:
+        raise fin.FinanceError('invalid_entity', 'Unsupported document target')
+    if payload.mime_type not in ALLOWED_UPLOADS:
+        raise fin.FinanceError('invalid_file_type', 'Only PDF, PNG and JPG files are allowed')
+    if len(payload.file_base64) > int(MAX_UPLOAD_BYTES * 1.4):
+        raise fin.FinanceError('file_too_large', 'File is larger than 5 MB', status=413)
     try:
-        file_bytes = base64.b64decode(payload.file_base64)
+        file_bytes = base64.b64decode(payload.file_base64, validate=True)
     except Exception:
-        raise ApiError(400, 'Invalid base64 payload')
-        
-    # Safe storage directory
+        raise fin.FinanceError('invalid_file', 'Invalid file content')
+    ext, magics = ALLOWED_UPLOADS[payload.mime_type]
+    if not file_bytes or len(file_bytes) > MAX_UPLOAD_BYTES or not any(file_bytes.startswith(m) for m in magics):
+        raise fin.FinanceError('invalid_file', 'File content does not match its type, or is empty / too large')
     media_root = getattr(settings, 'PRIVATE_MEDIA_ROOT', os.path.join(settings.BASE_DIR, 'private_media'))
-    org_dir = os.path.join(media_root, f'org_{org.pk}', payload.entity_type.lower())
+    org_dir = os.path.join(media_root, f'org_{org.pk}', entity_type)
     os.makedirs(org_dir, exist_ok=True)
-    
-    clean_filename = f"{int(datetime.now().timestamp())}_{payload.file_name.replace(' ', '_')}"
-    file_path = os.path.join(org_dir, clean_filename)
+    stored = f'{uuid.uuid4().hex}.{ext}'
+    file_path = os.path.join(org_dir, stored)
     with open(file_path, 'wb') as f:
         f.write(file_bytes)
-        
+    display_name = os.path.basename(payload.file_name.replace('\\', '/'))[:200] or stored
     doc = PrivateDocument.objects.create(
-        organization=org,
-        entity_type=payload.entity_type,
-        entity_id=payload.entity_id,
-        document_type=payload.document_type,
-        file_name=payload.file_name,
-        file_path=os.path.relpath(file_path, settings.BASE_DIR),
-        file_size=len(file_bytes),
-        mime_type=payload.mime_type
-    )
-    return {
-        'id': str(doc.pk),
-        'fileName': doc.file_name,
-        'documentType': doc.document_type,
-        'fileSize': doc.file_size,
-        'uploadedAt': doc.uploaded_at.isoformat(),
-        'success': True
-    }
+        organization=org, entity_type=entity_type, entity_id=str(payload.entity_id)[:64], document_type=payload.document_type[:60],
+        file_name=display_name, file_path=os.path.relpath(file_path, settings.BASE_DIR), file_size=len(file_bytes), mime_type=payload.mime_type,
+        uploaded_by=_resolve_actor(request, org).get_username())
+    return {'id': str(doc.pk), 'fileName': doc.file_name, 'documentType': doc.document_type, 'fileSize': doc.file_size,
+            'uploadedAt': doc.uploaded_at.isoformat(), 'success': True}
 
-@router.get('/orgs/{org_id}/documents')
+
+@router.get('/orgs/{org_id}/private-documents')
 def list_private_documents(request, org_id: int, entity_type: str, entity_id: str):
     org = _get_org(request, org_id)
-    qs = PrivateDocument.objects.filter(organization=org, entity_type=entity_type, entity_id=entity_id)
+    qs = PrivateDocument.objects.filter(organization=org, entity_type=entity_type.lower(), entity_id=entity_id)
     return [{
         'id': str(d.pk),
         'fileName': d.file_name,
@@ -3194,3 +3215,21 @@ def list_private_documents(request, org_id: int, entity_type: str, entity_id: st
     } for d in qs]
 
 
+@router.get('/orgs/{org_id}/private-documents/{doc_id}/download')
+def download_private_document(request, org_id: int, doc_id: int):
+    """Authenticated, organization-scoped download; the stored path never leaves the server."""
+    import os
+    from django.conf import settings
+    from django.http import FileResponse
+    org = _get_org(request, org_id)
+    d = PrivateDocument.objects.filter(pk=doc_id, organization=org).first()
+    if not d:
+        raise fin.FinanceError('not_found', 'Document not found', status=404)
+    root = os.path.realpath(getattr(settings, 'PRIVATE_MEDIA_ROOT', os.path.join(settings.BASE_DIR, 'private_media')))
+    full = os.path.realpath(os.path.join(settings.BASE_DIR, d.file_path))
+    if not full.startswith(root + os.sep) or not os.path.isfile(full):
+        raise fin.FinanceError('not_found', 'File not found', status=404)
+    resp = FileResponse(open(full, 'rb'), content_type=d.mime_type)
+    resp['Content-Disposition'] = 'attachment; filename="' + d.file_name.replace('"', '') + '"'
+    resp['X-Content-Type-Options'] = 'nosniff'
+    return resp

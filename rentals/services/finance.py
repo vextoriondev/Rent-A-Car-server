@@ -8,14 +8,14 @@ positive always means the outstanding amount the account name describes.
 import uuid
 from calendar import monthrange
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from django.db import transaction, IntegrityError
 from django.db.models import Sum, Q
 from .helpers import DomainError
 from .audit import audit
 from ..models import (
     Party, Vehicle, PartyDetail, PartyLedgerEntry as E, SalaryPayment, RentAccrual, AccountTransaction, FinancialAccount,
-    ReplacementAssignment, TasinInvoice, TasinInvoicePayment,
+    ReplacementAssignment, TasinInvoice, TasinInvoicePayment, FinanceSettings,
 )
 
 ZERO = Decimal('0.00')
@@ -75,6 +75,10 @@ def month_bounds(key):
 
 def new_txn_id(prefix='TXN'):
     return f'{prefix}-{uuid.uuid4().hex[:10].upper()}'
+
+
+def org_of(org):
+    return org
 
 
 def lock_party(org, party_id, kind=None):
@@ -216,10 +220,11 @@ def issue_advance(org, driver, user, amount, on_date, method='Cash', reference='
     return entry
 
 
-def issue_fuel_gas(org, driver, user, amount, on_date, vehicle=None, reference='', description='', direction='driver_owes', method='Cash', key=None):
+def issue_fuel_gas(org, driver, user, amount, on_date, vehicle=None, reference='', description='', direction=None, method='Cash', key=None):
     """direction: 'driver_owes' = company gave the driver fuel/gas money (settled by returning/deducting);
     'company_owes' = driver paid fuel/gas from own pocket and is to be reimbursed. The two are never mixed."""
     amount = money(amount)
+    direction = direction or get_finance_settings(org).fuel_default_direction
     if direction not in ('driver_owes', 'company_owes'):
         raise FinanceError('invalid_direction', 'Direction must be driver_owes or company_owes')
     account = A.DRIVER_FUEL_GAS if direction == 'driver_owes' else A.DRIVER_FUEL_REIMB
@@ -235,12 +240,16 @@ def issue_fuel_gas(org, driver, user, amount, on_date, vehicle=None, reference='
 
 
 def pay_salary(org, driver_id, user, month, on_date, method='Cash', reference='', notes='', advance_adjustment=0,
-               fuel_gas_settlement=0, fuel_gas_mode='none', fuel_gas_direction='driver_owes', amount_paid=None, idempotency_key=None):
+               fuel_gas_settlement=0, fuel_gas_mode='none', fuel_gas_direction=None, amount_paid=None, idempotency_key=None):
     """Atomic salary settlement: accrues the month (once), offsets chosen advance / fuel-gas, pays cash, posts account transactions.
     Returns (SalaryPayment, replayed)."""
     month = month_key(month)
     adv = money(advance_adjustment, allow_zero=True, field='Advance adjustment')
     fuel = money(fuel_gas_settlement, allow_zero=True, field='Fuel/Gas settlement')
+    policy = get_finance_settings(org_of(org))
+    fuel_gas_direction = fuel_gas_direction or policy.fuel_default_direction
+    if fuel_gas_mode == 'carry_forward':       # explicit: leave the fuel/gas balance outstanding, settle nothing now
+        fuel, fuel_gas_mode = ZERO, 'none'
     if fuel_gas_mode not in {c.value for c in SalaryPayment.FuelMode}:
         raise FinanceError('invalid_fuel_mode', 'Invalid fuel/gas settlement mode')
     if fuel > 0 and fuel_gas_mode == 'none':
@@ -375,6 +384,7 @@ def driver_summary(org, driver, date_from=None, date_to=None):
         'fuelGasReimbursed': S(reimb_settled),
         'remainingFuelGasReimbursable': S(balance(driver, A.DRIVER_FUEL_REIMB)),
         'otherOutstanding': S(other),
+        'fuelPolicy': {'direction': get_finance_settings(org).fuel_default_direction, 'settlement': get_finance_settings(org).fuel_default_settlement},
         'accruedPeriods': sorted(set(qs.filter(account=A.DRIVER_SALARY, entry_type=T.ACCRUAL).values_list('period', flat=True))),
         'history': [_entry_dict(e) for e in hist.order_by('-date', '-id')],
         'salaryPayments': [{'id': p.pk, 'month': p.salary_month, 'net': S(p.net_payable), 'paid': S(p.amount_paid), 'advance': S(p.advance_adjusted),
@@ -397,10 +407,71 @@ def driver_payable_for_dues(driver):
 
 # ─── owner: rent accrual, payments, summary ─────────────────────────────────
 
+def get_finance_settings(org):
+    return FinanceSettings.objects.get_or_create(organization=org)[0]
+
+
+PRORATION = {c.value for c in FinanceSettings.Proration}
+
+
+def update_finance_settings(org, user, rent_proration=None, fuel_default_direction=None, fuel_default_settlement=None):
+    """Change the accounting policy. Already-posted accruals and settlements are never recalculated; every change is audited."""
+    fs = get_finance_settings(org)
+    before = {'rent_proration': fs.rent_proration, 'fuel_default_direction': fs.fuel_default_direction, 'fuel_default_settlement': fs.fuel_default_settlement}
+    if rent_proration is not None:
+        if rent_proration not in PRORATION:
+            raise FinanceError('invalid_setting', 'Unknown rent proration method')
+        fs.rent_proration = rent_proration
+    if fuel_default_direction is not None:
+        if fuel_default_direction not in ('driver_owes', 'company_owes'):
+            raise FinanceError('invalid_setting', 'Unknown fuel/gas direction')
+        fs.fuel_default_direction = fuel_default_direction
+    if fuel_default_settlement is not None:
+        if fuel_default_settlement not in ('salary_deduction', 'cash', 'carry_forward'):
+            raise FinanceError('invalid_setting', 'Unknown fuel/gas settlement method')
+        fs.fuel_default_settlement = fuel_default_settlement
+    fs.updated_by = user if getattr(user, 'pk', None) else None
+    fs.save()
+    after = {'rent_proration': fs.rent_proration, 'fuel_default_direction': fs.fuel_default_direction, 'fuel_default_settlement': fs.fuel_default_settlement}
+    if before != after:
+        audit(org, user, 'finance.settings.update', 'finance_settings', fs.pk, before=before, after=after)
+    return fs
+
+
+def _money_round(v):
+    return Decimal(v).quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def prorate_rent(rate, start, end, period, method):
+    """Rent for one month. `start`/`end` are the inclusive assignment dates (None = open). Returns None when the assignment does not touch
+    the month, else {amount, days_charged, days_in_basis, basis, note}. Pure function: Decimal arithmetic, rounded half-up to 0.01."""
+    first, last = month_bounds(month_key(period))
+    rate = Decimal(rate)
+    eff_start = max(start, first) if start else first
+    eff_end = min(end, last) if end else last
+    if eff_end < eff_start:
+        return None
+    days = (eff_end - eff_start).days + 1          # inclusive: start day and return day are both charged
+    dim = (last - first).days + 1
+    if method == FinanceSettings.Proration.FULL_MONTH:
+        amount, basis_days, note = rate, dim, 'Full month rent'
+    elif method == FinanceSettings.Proration.CALENDAR_DAYS:
+        amount, basis_days = _money_round(rate * days / dim), dim
+        note = f'{rate} x {days}/{dim} days'
+    elif method == FinanceSettings.Proration.THIRTY_DAY:
+        basis_days = 30
+        charged = 30 if days >= dim else min(days, 30)   # a full calendar month always bills one whole month
+        amount = _money_round(rate * charged / 30)
+        note = f'{rate} x {charged}/30 days'
+    else:
+        raise FinanceError('invalid_setting', 'Unknown rent proration method')
+    return {'amount': _money_round(amount), 'days_charged': days, 'days_in_basis': basis_days, 'basis': str(method), 'note': note}
+
+
 def eligible_rent_lines(org, period, owner_id=None):
-    """Vehicles whose agreement window overlaps the month. Whole-month rent (no proration is defined by the client)."""
+    """Vehicles whose agreement window overlaps the month, with the calculation breakdown under the CURRENT policy."""
     period = month_key(period)
-    first, last = month_bounds(period)
+    method = get_finance_settings(org).rent_proration
     qs = Vehicle.objects.filter(organization=org).select_related('owner', 'detail')
     if owner_id:
         qs = qs.filter(owner_id=owner_id)
@@ -409,14 +480,15 @@ def eligible_rent_lines(org, period, owner_id=None):
         d = getattr(v, 'detail', None)
         if not d or d.status == 'Inactive' or not d.monthly_rent or d.monthly_rent <= 0:
             continue
-        start = d.agreement_start
-        if start and start > last:
-            continue
-        if d.agreement_end and d.agreement_end < first:
+        calc = prorate_rent(d.monthly_rent, d.agreement_start, d.agreement_end, period, method)
+        if not calc or calc['amount'] <= 0:
             continue
         posted = RentAccrual.objects.filter(organization=org, owner=v.owner, vehicle=v, period=period, status='posted').first()
         lines.append({'vehicleId': v.pk, 'registration': v.registration, 'ownerId': v.owner_id, 'owner': v.owner.name,
-                      'amount': S(d.monthly_rent), 'alreadyPosted': bool(posted), 'accrualId': posted.pk if posted else None})
+                      'amount': S(calc['amount']), 'monthlyRate': S(d.monthly_rent), 'basis': calc['basis'], 'daysCharged': calc['days_charged'],
+                      'daysInBasis': calc['days_in_basis'], 'calculation': calc['note'],
+                      'alreadyPosted': bool(posted), 'accrualId': posted.pk if posted else None,
+                      'postedAmount': S(posted.amount) if posted else None})
     return lines
 
 
@@ -440,12 +512,13 @@ def accrue_rent(org, user, period, owner_id=None, vehicle_ids=None):
             try:
                 with transaction.atomic():
                     acc = RentAccrual.objects.create(organization=org, owner=owner, vehicle=vehicle, period=period, amount=Decimal(line['amount']),
-                                                     created_by=user if getattr(user, 'pk', None) else None)
+                                                     monthly_rate=Decimal(line['monthlyRate']), proration_basis=line['basis'], days_charged=line['daysCharged'],
+                                                     days_in_basis=line['daysInBasis'], created_by=user if getattr(user, 'pk', None) else None)
             except IntegrityError:
                 skipped.append(line)
                 continue
             post_entry(org, owner, A.OWNER_PAYABLE, T.ACCRUAL, acc.amount, first, user, unique_key=f'rent:{acc.pk}', period=period, vehicle=vehicle,
-                       description=f'Monthly rent {period} – {vehicle.registration}', source_type='rent_accrual', source_id=str(acc.pk))
+                       description=f'Monthly rent {period} – {vehicle.registration} ({line["calculation"]})', source_type='rent_accrual', source_id=str(acc.pk))
             audit(org, user, 'owner.rent.accrue', 'rent_accrual', acc.pk, after={'period': period, 'amount': acc.amount, 'vehicle': vehicle.registration})
             created.append({**line, 'accrualId': acc.pk, 'alreadyPosted': True})
     return {'period': period, 'created': created, 'skipped': skipped}
@@ -805,3 +878,65 @@ def reconcile_ledger(org=None):
             if account in (A.OWNER_PAYABLE, A.CLIENT_RECEIVABLE, A.DRIVER_ADVANCE, A.DRIVER_FUEL_GAS, A.DRIVER_FUEL_REIMB, A.DRIVER_SALARY) and a['pos'] - a['neg'] < 0:
                 problems.append(f'party {pid} {account}: negative balance {a["pos"] - a["neg"]}')
     return problems
+
+
+# ─── owner additional charges, issue reversal, expenses summary ─────────────
+
+def owner_charge(org, owner_id, user, amount, on_date, description, vehicle=None, reference='', key=None):
+    """An approved extra amount payable to the owner (not monthly rent). Idempotent by key."""
+    amount = money(amount)
+    if not (description or '').strip():
+        raise FinanceError('description_required', 'Describe the charge')
+    with transaction.atomic():
+        owner = lock_party(org, owner_id, 'owner')
+        entry, created = post_entry(org, owner, A.OWNER_PAYABLE, T.ACCRUAL, amount, on_date, user, unique_key=f'ocharge:{key}' if key else None,
+                                    period=month_key(on_date), vehicle=vehicle, reference=reference, description=description.strip(), source_type='owner_charge')
+        if created:
+            audit(org, user, 'owner.charge', 'party', owner.pk, after={'amount': amount, 'description': description})
+    return entry, not created
+
+
+def reverse_issue_entry(org, entry_id, user, reason):
+    """Reverse an advance / fuel-gas issue. Refused when that would leave the account negative (it was already settled)."""
+    if not (reason or '').strip():
+        raise FinanceError('reason_required', 'A reason is required')
+    with transaction.atomic():
+        e = E.objects.filter(pk=entry_id, organization=org).first()
+        if not e or e.entry_type != T.ISSUE:
+            raise FinanceError('not_found', 'Issue entry not found', status=404)
+        lock_party(org, e.party_id)
+        if E.objects.filter(reverses=e).exists():
+            raise FinanceError('already_reversed', 'Already reversed', status=409)
+        if balance(e.party, e.account) - e.delta < 0:
+            raise FinanceError('already_settled', 'Part of this amount was already settled; reverse the settlement first', status=409)
+        rev = reverse_entry(org, e, user, reason)
+        txn = AccountTransaction.objects.filter(organization=org, idempotency_key__in=[f'advance-txn:{e.unique_key.split(":", 1)[1]}', f'fuel-txn:{e.unique_key.split(":", 1)[1]}']).first() if e.unique_key and ':' in e.unique_key else None
+        if txn:
+            _post_account_txn(org, user, date.today(), 'Income', f'Reversal: {txn.category}', txn.related_person, txn.amount, txn.payment_method, txn.reference,
+                              f'Reversal of {txn.transaction_id}: {reason}', txn.vehicle_reg, 'issue_reversal')
+        audit(org, user, 'driver.issue.reverse', 'party', e.party_id, reason=reason)
+        return rev
+
+
+def expense_summary(org, date_from=None, date_to=None, category=None, vehicle_reg=None):
+    """Expense totals by category/vehicle from posted Expense transactions (reversal credits net out)."""
+    qs = AccountTransaction.objects.filter(organization=org, transaction_type='Expense')
+    cr = AccountTransaction.objects.filter(organization=org, transaction_type='Income', source__in=['garage_reversal', 'issue_reversal', 'salary_reversal'])
+    for f in (qs, cr):
+        pass
+    if date_from:
+        qs, cr = qs.filter(date__gte=date_from), cr.filter(date__gte=date_from)
+    if date_to:
+        qs, cr = qs.filter(date__lte=date_to), cr.filter(date__lte=date_to)
+    if category:
+        qs = qs.filter(category=category)
+    if vehicle_reg:
+        qs, cr = qs.filter(vehicle_reg=vehicle_reg), cr.filter(vehicle_reg=vehicle_reg)
+    by_cat, by_veh, total = {}, {}, ZERO
+    for t in qs:
+        by_cat[t.category] = by_cat.get(t.category, ZERO) + t.amount
+        if t.vehicle_reg:
+            by_veh[t.vehicle_reg] = by_veh.get(t.vehicle_reg, ZERO) + t.amount
+        total += t.amount
+    credits = sum((t.amount for t in cr), ZERO)
+    return {'total': S(total), 'reversalCredits': S(credits), 'net': S(total - credits), 'byCategory': {k: S(v) for k, v in by_cat.items()}, 'byVehicle': {k: S(v) for k, v in by_veh.items()}, 'count': qs.count()}

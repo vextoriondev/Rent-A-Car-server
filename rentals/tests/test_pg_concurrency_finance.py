@@ -49,7 +49,7 @@ class LedgerConcurrencyTests(TransactionTestCase):
         self.admin = get_user_model().objects.create_user('admin', password='x')
         self.org = Organization.objects.create(name='TASIN')
         branch = Branch.objects.create(organization=self.org, name='Main')
-        Membership.objects.create(organization=self.org, user=self.admin, role='admin', branch=branch)
+        Membership.objects.create(organization=self.org, user=self.admin, role='super_admin', branch=branch)
         self.base = f'/api/v1/orgs/{self.org.pk}'
         self.driver = Party.objects.create(organization=self.org, kind='driver', name='D')
         PartyDetail.objects.create(party=self.driver, monthly_salary=D('20000'))

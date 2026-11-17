@@ -31,6 +31,11 @@ RULES = [
     (r'^transactions(/|$)', 'accounts'),
     (r'^daily-report$', 'expenses'),
     (r'^(tasin-agreements|documents-all)(/|$)', 'agreements'),
+    (r'^(garages/\d+/(statement|payments)|garage-payments/\d+/reverse)$', 'maintenance'),
+    (r'^finance-settings$', 'settings'),
+    (r'^owners/\d+/charges$', 'owners'),
+    (r'^ledger-entries/\d+/reverse$', 'drivers'),
+    (r'^expense-summary$', 'expenses'),
     (r'^dashboard(/|$)', 'dashboard'),
     (r'^tasin-owners(/|$)', 'owners'),
     (r'^tasin-vehicles(/|$)', 'vehicles'),
@@ -43,11 +48,11 @@ RULES = [
     (r'^(tasin-due-collection|due-followups)(/|$)', 'due_collection'),
     (r'^tasin-vehicle-search(/|$)', 'vehicle_search'),
     (r'^(tasin-alerts|custom-reminders)(/|$)', 'notifications'),
-    (r'^(tasin-reports|reports)(/|$)', 'reports'),
+    (r'^(tasin-reports|reports|custom-report-builder)(/|$)', 'reports'),
     (r'^tasin-settings/company$', ANY_MEMBER),          # company name/logo is needed on every screen
     (r'^tasin-settings(/|$)', 'settings'),
     (r'^backup(/|$)', 'settings'),
-    (r'^(documents|agreements)(/|$)', 'agreements'),
+    (r'^(documents|private-documents|agreements)(/|$)', 'agreements'),
     (r'^(access-requests|rbac)(/|$)', ANY_MEMBER),      # a user without a module asks for it here; handlers check admin rights themselves
 ]
 RULES = [(re.compile(p), m) for p, m in RULES]
@@ -60,7 +65,7 @@ def required_permission(method: str, rest: str):
     if module is None:
         return None
     action = ACTION_BY_METHOD.get(method.upper(), 'edit')
-    if rest.endswith('/read') or rest.startswith('reports/custom-builder'):
+    if rest.endswith('/read') or rest.startswith('custom-report-builder'):
         action = 'view'                                   # read-only POSTs
     elif rest.endswith('/status'):
         action = 'edit'

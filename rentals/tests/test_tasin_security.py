@@ -9,8 +9,8 @@ from rentals.models import Organization, Branch, Membership, Party, AccessReques
 User = get_user_model()
 
 
-# These three Tasin routes are shadowed by identically-shaped routes in other routers and answer 405 for everyone (pre-existing, see REMAINING_ISSUES).
-SHADOWED = {('POST', '/api/v1/orgs/1/reports/custom-builder'), ('POST', '/api/v1/orgs/1/documents/upload'), ('GET', '/api/v1/orgs/1/documents')}
+# (no shadowed routes any more: custom-builder/documents were renamed; see test_route_shadowing)
+SHADOWED = set()
 
 
 def routes(router):

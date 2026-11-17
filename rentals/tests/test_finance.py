@@ -16,7 +16,7 @@ class FinanceBase(TestCase):
         self.admin = User.objects.create_user('admin', password='x')  # canonical super admin
         self.org = Organization.objects.create(name='TASIN')
         self.branch = Branch.objects.create(organization=self.org, name='Main')
-        Membership.objects.create(organization=self.org, user=self.admin, role='admin', branch=self.branch)
+        Membership.objects.create(organization=self.org, user=self.admin, role='super_admin', branch=self.branch)
         self.c = Client()
         self.c.force_login(self.admin)
         self.base = f'/api/v1/orgs/{self.org.pk}'

@@ -14,6 +14,7 @@ from .notifications import NotificationOutbox, NotificationDelivery
 from .idempotency import IdempotencyRecord
 from .preferences import UserPreference
 from .finance import PartyLedgerEntry, SalaryPayment, RentAccrual, ReplacementAssignment, TasinAgreement
+from .garage import GarageLedgerEntry, FinanceSettings, LoginThrottle
 from .tasin import (
     VehicleDetail, PartyDetail, Duty, Garage, MaintenanceRecord, VehiclePaper,
     FinancialAccount, AccountTransaction, SystemAlert, CompanyProfile,
@@ -31,4 +32,4 @@ __all__ = ['uid','Organization','Branch','Membership','Party','Contact','PartyUs
     'DriverAttendance','SparePart','PartConsumption','DueFollowUp',
     'CustomReminder','TripDispatch','PrivateDocument',
     'UserProfile','UserModulePermission','AccessRequest',
-    'PartyLedgerEntry','SalaryPayment','RentAccrual','ReplacementAssignment','TasinAgreement']
+    'GarageLedgerEntry','FinanceSettings','LoginThrottle','PartyLedgerEntry','SalaryPayment','RentAccrual','ReplacementAssignment','TasinAgreement']
