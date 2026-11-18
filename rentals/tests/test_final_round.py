@@ -499,3 +499,62 @@ class RouteAndUploadTests(Base):
         c2.force_login(u2)
         self.assertEqual(c2.get(f'/api/v1/orgs/{org2.pk}/private-documents/{did}/download').status_code, 404)
         self.assertEqual(c2.get(f'/api/v1/orgs/{self.org.pk}/private-documents/{did}/download').status_code, 403)
+
+
+class DutyEditTests(Base):
+    def duty(self, **kw):
+        body = {'date': '2026-11-10', 'client_id': '', 'client_name': 'C', 'vehicle_id': str(self.car.pk), 'vehicle_reg': 'CAR-1', 'driver_id': str(self.driver.pk), 'driver_name': 'Driver',
+                'pickup_location': 'A', 'destination': 'B', 'start_time': '09:00', 'customer_contact': '017', 'agreed_rent': '1000', 'fuel_cost': '100', 'discount': '50'}
+        body.update(kw)
+        return body
+
+    def make(self, **kw):
+        r = self.c.post(f'{self.base}/tasin-duties', data=json.dumps(self.duty(**kw)), content_type='application/json')
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()['id']
+
+    def put(self, did, **kw):
+        return self.c.put(f'{self.base}/tasin-duties/{did}', data=json.dumps(self.duty(**kw)), content_type='application/json')
+
+    def test_create_links_vehicle_driver_and_edit_recomputes_total(self):
+        from rentals.models import Duty
+        did = self.make()
+        d = Duty.objects.get(pk=did)
+        self.assertEqual((d.vehicle_id, d.driver_id, d.total_amount), (self.car.pk, self.driver.pk, D('1050.00')))
+        r = self.put(did, agreed_rent='2000', fuel_cost='0', discount='0', destination='C')
+        self.assertEqual(r.status_code, 200, r.content)
+        d.refresh_from_db()
+        self.assertEqual((d.total_amount, d.destination), (D('2000.00'), 'C'))
+
+    def test_edit_validation_conflict_lock_and_isolation(self):
+        a = self.make()
+        b = self.make(date='2026-11-11')
+        self.assertEqual(self.put(b, date='2026-11-10').status_code, 409)           # same vehicle+driver already booked on the 10th by duty a
+        self.assertEqual(self.put(a, agreed_rent='-5').status_code, 422)
+        self.assertEqual(self.put(999999).status_code, 404)
+        from rentals.models import Duty
+        Duty.objects.filter(pk=a).update(is_invoiced=True)
+        self.assertEqual(self.put(a, agreed_rent='1').status_code, 409)             # invoiced duties are locked
+        other = Organization.objects.create(name='X')
+        u2 = User.objects.create_user('x', password='x')
+        Membership.objects.create(organization=other, user=u2, role='admin', is_super_admin=True)
+        c2 = Client(); c2.force_login(u2)
+        self.assertEqual(c2.put(f'/api/v1/orgs/{other.pk}/tasin-duties/{b}', data=json.dumps(self.duty()), content_type='application/json').status_code, 404)
+
+    def test_status_endpoint_needs_numeric_id(self):
+        did = self.make()
+        self.assertEqual(self.post(f'/../tasin-duties/{did}/status'.replace('/..', ''), {'status': 'Running'}).status_code, 200)
+        self.assertEqual(self.c.post(f'{self.base}/tasin-duties/DTY-001/status', data=json.dumps({'status': 'Running'}), content_type='application/json').status_code, 422)
+
+
+class VehicleInvoiceTermsTests(Base):
+    def test_client_invoice_never_shows_owner_terms(self):
+        from rentals.models import Duty
+        client = Party.objects.create(organization=self.org, kind='customer', name='Cl')
+        PartyDetail.objects.create(party=client)
+        self.post('/tasin-agreements', {'agreement_type': 'owner', 'party_id': self.owner.pk, 'vehicle_id': self.car.pk, 'title': 'Owner deal', 'start_date': '2026-11-01', 'custom_terms': ['OWNER SECRET TERM'], 'finalize': True})
+        b = self.get(f'/vehicles/{self.car.pk}/billing?month=2026-11').json()
+        self.assertEqual(b['invoice']['terms'], [])
+        self.post('/tasin-agreements', {'agreement_type': 'client', 'party_id': client.pk, 'vehicle_id': self.car.pk, 'title': 'Client deal', 'start_date': '2026-11-01', 'custom_terms': ['Client term'], 'finalize': True})
+        b = self.get(f'/vehicles/{self.car.pk}/billing?month=2026-11').json()
+        self.assertEqual(b['invoice']['terms'], ['Client term'])

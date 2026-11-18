@@ -778,7 +778,7 @@ def vehicle_billing(org, vehicle, month=None):
         charges = sum((d.total_amount for d in mduties), ZERO)
         received = sum((t.amount for t in mpays if t.transaction_type == 'Income'), ZERO)
         made = sum((t.amount for t in mpays if t.transaction_type == 'Expense'), ZERO)
-        agr = TasinAgreement.objects.filter(organization=org, vehicle=vehicle).order_by('-id').first()
+        agr = TasinAgreement.objects.filter(organization=org, vehicle=vehicle, agreement_type='client').order_by('-id').first()   # a client invoice never carries the owner's terms
         from .tasin import get_or_create_company_profile
         cp = get_or_create_company_profile(org)
         out['invoice'] = {

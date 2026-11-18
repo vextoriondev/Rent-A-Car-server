@@ -1330,6 +1330,9 @@ def list_duties(request, org_id: int, date_val: str | None = None, status: str |
 @router.post('/orgs/{org_id}/tasin-duties')
 def create_duty(request, org_id: int, payload: DutyIn):
     org = _get_org(request, org_id)
+    for v in (payload.agreed_rent, payload.fuel_cost, payload.overtime_charge, payload.driver_allowance, payload.additional_charge, payload.discount):
+        if v < 0:
+            raise fin.FinanceError('invalid_amount', 'Amounts cannot be negative')
     total = payload.agreed_rent + payload.fuel_cost + payload.overtime_charge + payload.driver_allowance + payload.additional_charge - payload.discount
     count = Duty.objects.filter(organization=org).count() + 1
     duty_code = f'DTY-{count:03d}'
@@ -1385,6 +1388,49 @@ def create_duty(request, org_id: int, payload: DutyIn):
         status=payload.status
     )
     return {'id': str(d.pk), 'dutyId': d.duty_id, 'totalAmount': float(d.total_amount), 'success': True}
+
+def _duty_conflicts(org, payload, vehicle, driver, exclude_pk=None):
+    if payload.status not in ('Scheduled', 'Running'):
+        return
+    for field, obj, label in (('vehicle', vehicle, f'Vehicle {payload.vehicle_reg}'), ('driver', driver, f'Driver {payload.driver_name}')):
+        if not obj:
+            continue
+        qs = Duty.objects.filter(organization=org, date=payload.date, status__in=['Scheduled', 'Running'], **{field: obj})
+        if exclude_pk:
+            qs = qs.exclude(pk=exclude_pk)
+        other = qs.first()
+        if other:
+            raise ApiError(409, f"{label} is already booked for Duty {other.duty_id} on {payload.date}")
+
+
+@router.put('/orgs/{org_id}/tasin-duties/{duty_id}')
+def update_duty(request, org_id: int, duty_id: int, payload: DutyIn):
+    """Edit a duty. Money fields are recomputed on the server; an invoiced duty is locked (its amount is already billed)."""
+    org = _get_org(request, org_id)
+    for v in (payload.agreed_rent, payload.fuel_cost, payload.overtime_charge, payload.driver_allowance, payload.additional_charge, payload.discount):
+        if v < 0:
+            raise fin.FinanceError('invalid_amount', 'Amounts cannot be negative')
+    with transaction.atomic():
+        d = Duty.objects.select_for_update().filter(pk=duty_id, organization=org).first()
+        if not d:
+            raise ApiError(404, 'Duty not found')
+        if d.is_invoiced:
+            raise fin.FinanceError('duty_invoiced', 'This duty is already on an invoice and can no longer be edited', status=409)
+        client = Party.objects.filter(pk=int(payload.client_id), organization=org).first() if payload.client_id and payload.client_id.isdigit() else d.client
+        vehicle = Vehicle.objects.filter(pk=int(payload.vehicle_id), organization=org).first() if payload.vehicle_id and payload.vehicle_id.isdigit() else d.vehicle
+        driver = Party.objects.filter(pk=int(payload.driver_id), organization=org).first() if payload.driver_id and payload.driver_id.isdigit() else d.driver
+        _duty_conflicts(org, payload, vehicle, driver, exclude_pk=d.pk)
+        d.date, d.client, d.client_name = payload.date, client, payload.client_name.strip()
+        d.vehicle, d.vehicle_reg, d.driver, d.driver_name = vehicle, payload.vehicle_reg.strip(), driver, payload.driver_name.strip()
+        d.pickup_location, d.destination = payload.pickup_location.strip(), payload.destination.strip()
+        d.start_time, d.end_time, d.duty_type = payload.start_time.strip(), payload.end_time.strip(), payload.duty_type
+        d.customer_contact, d.description = payload.customer_contact.strip(), payload.description.strip()
+        d.agreed_rent, d.fuel_cost, d.overtime_charge = payload.agreed_rent, payload.fuel_cost, payload.overtime_charge
+        d.driver_allowance, d.additional_charge, d.discount = payload.driver_allowance, payload.additional_charge, payload.discount
+        d.total_amount = d.agreed_rent + d.fuel_cost + d.overtime_charge + d.driver_allowance + d.additional_charge - d.discount
+        d.save()
+    return {'id': str(d.pk), 'dutyId': d.duty_id, 'totalAmount': float(d.total_amount), 'success': True}
+
 
 @router.post('/orgs/{org_id}/tasin-duties/{duty_id}/status')
 def set_duty_status(request, org_id: int, duty_id: int, payload: DutyStatusIn):
