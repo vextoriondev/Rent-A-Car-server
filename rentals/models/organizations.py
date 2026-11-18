@@ -17,7 +17,7 @@ class Membership(models.Model):
         MECHANIC='mechanic','Mechanic'; OWNER='owner','Owner'; DRIVER='driver','Driver'; CUSTOMER='customer','Customer'
     organization = models.ForeignKey(Organization,on_delete=models.CASCADE,related_name='memberships')
     user = models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.CASCADE,related_name='rentflow_memberships')
-    role = models.CharField(max_length=16,choices=Role.choices)
+    role = models.CharField(max_length=32,choices=Role.choices)
     branch = models.ForeignKey(Branch,null=True,blank=True,on_delete=models.SET_NULL,related_name='memberships')
     is_super_admin = models.BooleanField(default=False,help_text='Explicit, organization-scoped Super Admin. Only an existing Super Admin can set it (audited). `role` stays admin so the RentFlow engine keeps working.')
     class Meta: constraints=[models.UniqueConstraint(fields=['organization','user'],name='unique_org_user')]

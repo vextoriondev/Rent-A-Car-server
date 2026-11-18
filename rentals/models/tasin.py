@@ -229,6 +229,9 @@ class AccountTransaction(models.Model):
         ordering = ['-date', '-id']
         constraints = [
             models.UniqueConstraint(fields=['organization', 'idempotency_key'], condition=models.Q(idempotency_key__isnull=False), name='uniq_account_txn_idem'),
+            # a payment/receipt reference can be used once per organization; enforced by the database, not by a check-then-insert
+            models.UniqueConstraint(fields=['organization', 'reference'], condition=models.Q(source='vehicle_payment') & ~models.Q(reference=''), name='uniq_vehicle_payment_reference'),
+            models.UniqueConstraint(fields=['organization', 'reference'], condition=models.Q(source='custom') & ~models.Q(reference=''), name='uniq_custom_txn_reference'),
         ]
 
 class SystemAlert(models.Model):

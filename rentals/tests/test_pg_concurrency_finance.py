@@ -159,3 +159,62 @@ class LedgerConcurrencyTests(TransactionTestCase):
             PartyLedgerEntry.objects.create(organization=self.org, party=self.owner, account='owner_payable', entry_type='opening', delta=D('1'), date=date.today(), unique_key='k')
         with self.assertRaises(IntegrityError), transaction.atomic():
             PartyLedgerEntry.objects.create(organization=self.org, party=self.owner, account='owner_payable', entry_type='opening', delta=D('0'), date=date.today())
+
+
+@skipUnless(IS_PG, 'needs PostgreSQL: SQLite ignores select_for_update')
+class ExtraConcurrencyTests(LedgerConcurrencyTests):
+    """Garage payments, reversals, opening balances and vehicle-payment references under real concurrency."""
+    def test_concurrent_garage_payments_cannot_overdraw(self):
+        from rentals.models import Garage, MaintenanceRecord
+        from rentals.services import garage as gsvc
+        g = Garage.objects.create(organization=self.org, garage_id='G1', name='Speedy', mobile='1')
+        c0 = Client(); c0.force_login(self.admin)
+        r = c0.post(self.base + '/tasin-maintenance', data=json.dumps({'vehicle_reg': 'CAR-0', 'garage_name': 'Speedy', 'date': '2026-11-10', 'problem_description': 'x', 'labour_cost': '1000', 'parts_cost': '9000'}), content_type='application/json')
+        self.assertEqual(r.status_code, 200, r.content)
+        res = run_parallel(6, lambda i, c: self.post(c, f'/garages/{g.pk}/payments', {'amount': '4000', 'date': '2026-11-11', 'reference': f'GV{i}'}, key=f'g{i}'))
+        self.assertEqual(self.codes(res).count(200), 2)                     # 10,000 payable: only two 4,000 payments fit
+        self.assertEqual(gsvc.garage_balance(g), D('2000'))
+        self.assertEqual(gsvc.reconcile_garages(self.org), [])
+
+    def test_concurrent_garage_payment_reversal_only_once(self):
+        from rentals.models import Garage, GarageLedgerEntry
+        from rentals.services import garage as gsvc
+        g = Garage.objects.create(organization=self.org, garage_id='G2', name='Other', mobile='1')
+        gsvc.post(self.org, g, 'bill', D('5000'), date.today(), self.admin, unique_key='seed')
+        e, _, _ = gsvc.pay_garage(self.org, g.pk, self.admin, D('3000'), date.today(), reference='P1')
+        res = run_parallel(6, lambda i, c: self.post(c, f'/garage-payments/{e.pk}/reverse', {'reason': 'x'}))
+        self.assertEqual(self.codes(res).count(200), 1)
+        self.assertEqual(GarageLedgerEntry.objects.filter(reverses=e).count(), 1)
+        self.assertEqual(gsvc.garage_balance(g), D('5000'))
+
+    def test_concurrent_opening_balance_posts_once(self):
+        res = run_parallel(6, lambda i, c: self.post(c, f'/parties/{self.owner.pk}/opening-balance', {'balance_type': 'payable', 'amount': '1000'}))
+        self.assertEqual(self.codes(res).count(200), 1)
+        self.assertEqual(PartyLedgerEntry.objects.filter(party=self.owner, entry_type='opening').count(), 1)
+        self.assertEqual(fin.balance(self.owner, 'owner_payable'), D('1000'))
+
+    def test_concurrent_salary_reversal_only_once(self):
+        sp, _ = fin.pay_salary(self.org, self.driver.pk, self.admin, '2026-11', date(2026, 11, 30))
+        res = run_parallel(6, lambda i, c: self.post(c, f'/salary-payments/{sp.pk}/reverse', {'reason': 'x'}))
+        self.assertEqual(self.codes(res).count(200), 1)
+        self.assertEqual(fin.balance(self.driver, 'driver_salary'), D('20000'))
+        self.assert_reconciled()
+
+    def test_concurrent_vehicle_payments_same_reference(self):
+        res = run_parallel(6, lambda i, c: self.post(c, f'/vehicles/{self.cars[0].pk}/payments', {'direction': 'receive', 'amount': '500', 'date': '2026-11-12', 'reference': 'SAMEREF'}, key=f'v{i}'))
+        self.assertEqual(self.codes(res).count(200), 1)
+        self.assertEqual(AccountTransaction.objects.filter(source='vehicle_payment', reference='SAMEREF').count(), 1)
+
+    def test_concurrent_mixed_payments_keep_ledger_reconciled(self):
+        fin.set_opening_balance(self.org, self.owner, self.admin, 'payable', D('100000'))
+        fin.set_opening_balance(self.org, self.client_party, self.admin, 'receivable', D('100000'))
+        def work(i, c):
+            if i % 3 == 0:
+                return self.post(c, f'/owners/{self.owner.pk}/ledger-payments', {'amount': '30000', 'date': '2026-11-20'}, key=f'mo{i}')
+            if i % 3 == 1:
+                return self.post(c, f'/clients/{self.client_party.pk}/ledger-payments', {'amount': '30000', 'date': '2026-11-20'}, key=f'mc{i}')
+            return self.post(c, f'/drivers/{self.driver.pk}/salary-payments', {'salary_month': f'2026-{(i % 12) + 1:02d}', 'payment_date': '2026-11-30'}, key=f'ms{i}')
+        self.codes(run_parallel(12, work))
+        self.assertGreaterEqual(fin.balance(self.owner, 'owner_payable'), D('0'))
+        self.assertGreaterEqual(fin.balance(self.client_party, 'client_receivable'), D('0'))
+        self.assert_reconciled()

@@ -626,8 +626,8 @@ def client_summary(org, client, date_from=None, date_to=None):
 
 # ─── vehicle payments (receive / make) ─────────────────────────────────────
 
-def vehicle_payment(org, user, direction, vehicle, amount, on_date, counterparty, method='Cash', reference='', description='',
-                    invoice_id=None, party_id=None, key=None):
+def _vehicle_payment(org, user, direction, vehicle, amount, on_date, counterparty, method='Cash', reference='', description='',
+                     invoice_id=None, party_id=None, key=None):
     """direction 'receive' -> Income, 'make' -> Expense. A receive against an invoice reduces that invoice (and the client receivable once)."""
     amount = money(amount)
     if direction not in ('receive', 'make'):
@@ -694,7 +694,7 @@ def daily_report(org, day):
 
 # ─── custom transaction ─────────────────────────────────────────────────────
 
-def custom_transaction(org, user, kind, title, amount, on_date, method='Cash', description='', party_name='', vehicle_reg='', reference='', key=None):
+def _custom_transaction(org, user, kind, title, amount, on_date, method='Cash', description='', party_name='', vehicle_reg='', reference='', key=None):
     amount = money(amount)
     title = ' '.join((title or '').split())
     if kind not in ('Income', 'Expense'):
@@ -940,3 +940,19 @@ def expense_summary(org, date_from=None, date_to=None, category=None, vehicle_re
         total += t.amount
     credits = sum((t.amount for t in cr), ZERO)
     return {'total': S(total), 'reversalCredits': S(credits), 'net': S(total - credits), 'byCategory': {k: S(v) for k, v in by_cat.items()}, 'byVehicle': {k: S(v) for k, v in by_veh.items()}, 'count': qs.count()}
+
+
+def vehicle_payment(*args, **kwargs):
+    """See `_vehicle_payment`. A reference that loses a race is rejected by the database constraint and reported as 409 (everything rolled back)."""
+    try:
+        return _vehicle_payment(*args, **kwargs)
+    except IntegrityError:
+        ref = kwargs.get('reference') or (args[8] if len(args) > 8 else '')
+        raise FinanceError('duplicate_reference', f'Payment reference "{ref}" has already been used', status=409)
+
+
+def custom_transaction(*args, **kwargs):
+    try:
+        return _custom_transaction(*args, **kwargs)
+    except IntegrityError:
+        raise FinanceError('duplicate_reference', 'This reference already exists', status=409)
