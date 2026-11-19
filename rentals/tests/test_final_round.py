@@ -558,3 +558,40 @@ class VehicleInvoiceTermsTests(Base):
         self.post('/tasin-agreements', {'agreement_type': 'client', 'party_id': client.pk, 'vehicle_id': self.car.pk, 'title': 'Client deal', 'start_date': '2026-11-01', 'custom_terms': ['Client term'], 'finalize': True})
         b = self.get(f'/vehicles/{self.car.pk}/billing?month=2026-11').json()
         self.assertEqual(b['invoice']['terms'], ['Client term'])
+
+
+class PartialUpdateTests(TestCase):
+    """An edit form that does not send a field must not reset it to a default."""
+    def setUp(self):
+        from django.contrib.auth.models import User
+        from rentals.models import Organization, Membership
+        self.org = Organization.objects.create(name='PU')
+        self.user = User.objects.create_user('pu_admin', password='x')
+        Membership.objects.create(user=self.user, organization=self.org, role='admin', is_super_admin=True)
+        self.c = Client(); self.c.force_login(self.user)
+
+    def _json(self, method, url, body):
+        import json
+        return getattr(self.c, method)(url, data=json.dumps(body), content_type='application/json')
+
+    def test_vehicle_edit_keeps_unsent_fields(self):
+        base = f'/api/v1/orgs/{self.org.pk}/tasin-vehicles'
+        r = self._json('post', base, {'registration': 'PU-1', 'model': 'Axio', 'brand': 'Toyota', 'year': 2019, 'category': 'SUV', 'color': 'Black', 'monthly_rent': 40000})
+        self.assertEqual(r.status_code, 200, r.content)
+        vid = r.json()['id']
+        r = self._json('put', f'{base}/{vid}', {'registration': 'PU-1', 'model': 'Axio', 'brand': 'Toyota', 'monthly_rent': 42000})
+        self.assertEqual(r.status_code, 200, r.content)
+        from rentals.models import VehicleDetail
+        det = VehicleDetail.objects.get(vehicle_id=vid)
+        self.assertEqual((det.category, det.color, det.year, int(det.monthly_rent)), ('SUV', 'Black', 2019, 42000))
+
+    def test_driver_edit_keeps_unsent_fields(self):
+        base = f'/api/v1/orgs/{self.org.pk}/tasin-drivers'
+        r = self._json('post', base, {'name': 'Dr One', 'phone': '017', 'monthly_salary': 20000, 'emergency_contact': 'Mom 018', 'license_type': 'Professional'})
+        self.assertEqual(r.status_code, 200, r.content)
+        did = r.json()['id']
+        r = self._json('put', f'{base}/{did}', {'name': 'Dr One', 'phone': '017', 'status': 'Inactive'})
+        self.assertEqual(r.status_code, 200, r.content)
+        from rentals.models import PartyDetail
+        det = PartyDetail.objects.get(party_id=did)
+        self.assertEqual((int(det.monthly_salary), det.emergency_contact, det.status), (20000, 'Mom 018', 'Inactive'))

@@ -89,7 +89,7 @@ def approve_case(request,org_id:int,case_id:int):
 def audit_events(request,org_id:int,action:str|None=None,target_type:str|None=None,target_id:str|None=None,actor_id:int|None=None,date_from:date|None=None,date_to:date|None=None,limit:int=50,offset:int=0):
     m=membership(request,org_id,'audit.read')
     if policies.limited_branch(m):raise ApiError(403, 'the_audit_log_covers_every_branch_ask')
-    qs=AuditEvent.objects.filter(organization=m.organization)
+    qs=AuditEvent.objects.filter(organization=m.organization).select_related('actor')
     if action:qs=qs.filter(action__startswith=action)
     if target_type:qs=qs.filter(target_type=target_type)
     if target_id:qs=qs.filter(target_id=target_id)

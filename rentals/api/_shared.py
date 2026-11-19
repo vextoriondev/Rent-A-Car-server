@@ -167,7 +167,7 @@ def document_dict(d):
     return {'id':d.pk,'target_type':d.target_type,'target_id':d.target_id,'name':d.original_name,'content_type':d.content_type,'size':d.size,'sha256':d.sha256,'category':d.category,'created_at':d.created_at.isoformat()}
 
 def audit_dict(a):
-    return {'id':a.pk,'at':a.at.isoformat(),'actor_id':a.actor_id,'action':a.action,'target_type':a.target_type,'target_id':a.target_id,'before':a.before,'after':a.after,'reason':a.reason,'request_id':a.request_id,'ip':a.ip}
+    return {'id':a.pk,'at':a.at.isoformat(),'actor_id':a.actor_id,'action':a.action,'target_type':a.target_type,'target_id':a.target_id,'before':a.before,'after':a.after,'reason':a.reason,'request_id':a.request_id,'ip':a.ip,'actor_name':(a.actor.get_username() if a.actor_id else '')}
 
 def paginate(qs,limit,offset,serialize):
     """Shared list envelope {count, items, next}; next is the offset of the following page or null. Limit is capped at 200."""

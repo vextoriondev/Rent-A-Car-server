@@ -701,13 +701,14 @@ def update_vehicle(request, org_id: int, vehicle_id: int, payload: VehicleInCust
         v.owner_id = payload.owner_id
     v.save()
     det, _ = VehicleDetail.objects.get_or_create(vehicle=v)
-    det.brand = payload.brand.strip()
-    det.model = payload.model.strip()
-    det.year = payload.year
-    det.category = payload.category
-    det.color = payload.color
-    det.status = payload.status
-    det.monthly_rent = payload.monthly_rent
+    sent = payload.model_fields_set   # only fields the client actually sent are changed; an edit form must not reset the rest to defaults
+    if 'brand' in sent and payload.brand.strip(): det.brand = payload.brand.strip()
+    if payload.model.strip(): det.model = payload.model.strip()
+    if 'year' in sent and payload.year: det.year = payload.year
+    if 'category' in sent: det.category = payload.category
+    if 'color' in sent: det.color = payload.color
+    if 'status' in sent: det.status = payload.status
+    if 'monthly_rent' in sent: det.monthly_rent = payload.monthly_rent
     if payload.driver_id:
         det.assigned_driver_id = payload.driver_id
     det.save()
@@ -841,20 +842,21 @@ def update_driver(request, org_id: int, driver_id: int, payload: DriverIn):
     org = _get_org(request, org_id)
     d = Party.objects.filter(pk=driver_id, organization=org, kind=Party.Kind.DRIVER).first()
     if not d: raise ApiError(404, 'Driver not found')
+    sent = payload.model_fields_set   # only fields the client sent are changed; unsent fields keep their saved values
     d.name = payload.name.strip()
     d.phone = payload.phone.strip()
-    d.nid_number = payload.nid.strip()
-    d.driving_licence_number = payload.license_no.strip()
+    if 'nid' in sent: d.nid_number = payload.nid.strip()
+    if 'license_no' in sent: d.driving_licence_number = payload.license_no.strip()
     d.save()
     det, _ = PartyDetail.objects.get_or_create(party=d)
-    det.alt_mobile = payload.alt_mobile.strip()
-    det.present_address = payload.present_address.strip()
-    det.license_type = payload.license_type
-    det.license_expiry = payload.license_expiry
-    det.emergency_contact = payload.emergency_contact.strip()
-    det.monthly_salary = payload.monthly_salary
-    det.daily_allowance = payload.daily_allowance
-    det.status = payload.status
+    if 'alt_mobile' in sent: det.alt_mobile = payload.alt_mobile.strip()
+    if 'present_address' in sent: det.present_address = payload.present_address.strip()
+    if 'license_type' in sent: det.license_type = payload.license_type
+    if 'license_expiry' in sent: det.license_expiry = payload.license_expiry
+    if 'emergency_contact' in sent: det.emergency_contact = payload.emergency_contact.strip()
+    if 'monthly_salary' in sent: det.monthly_salary = payload.monthly_salary
+    if 'daily_allowance' in sent: det.daily_allowance = payload.daily_allowance
+    if 'status' in sent: det.status = payload.status
     if payload.assigned_vehicle_id:
         det.assigned_vehicle_id = payload.assigned_vehicle_id
     det.save()
