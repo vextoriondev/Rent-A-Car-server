@@ -7,7 +7,7 @@ import re
 import uuid
 import zipfile
 from django.conf import settings
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, OperationalError, ProgrammingError, transaction
 from django.db.models import Sum, Count
 from ...models import Attachment, Party, Vehicle, TasinAgreement, MaintenanceRecord, AccountTransaction
 from ..audit import audit
@@ -379,10 +379,17 @@ NO_PHOTO = {'photoId': '', 'photoUrl': '', 'thumbUrl': ''}
 
 
 def profile_map(org, field):
-    """{record pk: photo urls} for every profile picture of `field` ('party' | 'vehicle') in one query, for list screens."""
+    """{record pk: photo urls} for every profile picture of `field` ('party' | 'vehicle') in one query, for list screens.
+    If the attachments table does not exist yet (code deployed before `migrate`) the lists still work, just without pictures."""
     out = {}
-    for pk, att_id, has_thumb in Attachment.objects.filter(organization=org, kind='profile', **{field + '__isnull': False}).values_list(field + '_id', 'id', 'status'):
-        if has_thumb != 'completed':
+    try:
+        with transaction.atomic():
+            rows = list(Attachment.objects.filter(organization=org, kind='profile', **{field + '__isnull': False}).values_list(field + '_id', 'id', 'status'))
+    except (ProgrammingError, OperationalError):
+        log.warning('attachments table is missing: run `python manage.py migrate`; lists are shown without pictures')
+        return out
+    for pk, att_id, status in rows:
+        if status != 'completed':
             continue
         base = f'/orgs/{org.pk}/files/{att_id}/content'
         out[pk] = {'photoId': str(att_id), 'photoUrl': base + '?variant=large', 'thumbUrl': base + '?variant=thumb'}

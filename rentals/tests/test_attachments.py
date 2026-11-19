@@ -504,3 +504,19 @@ class CleanupCommandTests(Base):
         out = io.StringIO()
         call_command('cleanup_orphan_files', stdout=out)
         self.assertIn('missing from storage', out.getvalue())
+
+
+class MissingTableResilienceTests(Base):
+    def test_lists_work_without_the_attachments_table(self):
+        from django.db.utils import ProgrammingError
+        with mock.patch('rentals.services.files.attachments.Attachment.objects') as m:
+            m.filter.side_effect = ProgrammingError('relation "rentals_attachment" does not exist')
+            r = self.c.get(f'/api/v1/orgs/{self.org.pk}/tasin-drivers')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()[0]['thumbUrl'], '')
+
+    def test_lists_carry_photo_urls_when_a_profile_exists(self):
+        self.up([('p.jpg', jpeg(300, 300), 'image/jpeg')], kind='profile')
+        row = [d for d in self.c.get(f'/api/v1/orgs/{self.org.pk}/tasin-drivers').json() if d['id'] == str(self.driver.pk)][0]
+        self.assertIn('variant=thumb', row['thumbUrl'])
+        self.assertEqual(row['photoUrl'].split('?')[0], row['thumbUrl'].split('?')[0])
