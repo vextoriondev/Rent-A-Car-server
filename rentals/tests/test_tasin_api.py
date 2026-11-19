@@ -68,11 +68,28 @@ class TasinApiTests(TestCase):
         r_over = self.c.post(f'/api/v1/orgs/{self.org.pk}/tasin-owners/{owner_id}/payments', data={'amount': 5000.01}, content_type='application/json')
         self.assertEqual(r_over.status_code, 422)
 
+    def test_vehicle_requires_a_real_owner_and_registration(self):
+        from rentals.models import Party
+        base = {'brand': 'Toyota', 'model': 'Premio', 'year': 2022}
+        url = f'/api/v1/orgs/{self.org.pk}/tasin-vehicles'
+        r = self.c.post(url, data={**base, 'registration': 'NOOWNER-1'}, content_type='application/json')
+        self.assertEqual(r.status_code, 422)            # never silently attached to "some" owner
+        self.assertEqual(Party.objects.filter(name='Default Owner').count(), 0)
+        owner = Party.objects.create(organization=self.org, kind='owner', name='Real Owner')
+        self.assertEqual(self.c.post(url, data={**base, 'owner_id': owner.pk}, content_type='application/json').status_code, 422)   # no registration
+        ok = self.c.post(url, data={**base, 'registration': 'OWN-1', 'owner_id': owner.pk}, content_type='application/json')
+        self.assertEqual(ok.status_code, 200, ok.content)
+        self.assertEqual(self.c.post(url, data={**base, 'registration': 'own-1', 'owner_id': owner.pk}, content_type='application/json').status_code, 409)
+        other_owner = Party.objects.create(organization=self.org, kind='driver', name='Not an owner')
+        self.assertEqual(self.c.post(url, data={**base, 'registration': 'X-2', 'owner_id': other_owner.pk}, content_type='application/json').status_code, 422)
+
     def test_vehicle_lifecycle(self):
+        from rentals.models import Party
+        self.owner_for_vehicle = Party.objects.create(organization=self.org, kind='owner', name='Lifecycle Owner')
         r_create = self.c.post(
             f'/api/v1/orgs/{self.org.pk}/tasin-vehicles',
             data={
-                'registration': 'DHA-GA-11-2233', 'brand': 'Toyota', 'model': 'Premio',
+                'registration': 'DHA-GA-11-2233', 'owner_id': self.owner_for_vehicle.pk, 'brand': 'Toyota', 'model': 'Premio',
                 'year': 2022, 'category': 'Sedan', 'color': 'White', 'monthly_rent': 55000,
                 'status': 'Available'
             },

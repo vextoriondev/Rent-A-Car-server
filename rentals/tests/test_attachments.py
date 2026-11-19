@@ -391,6 +391,20 @@ class AccessTests(Base):
         self.assertEqual(c.delete(f'/api/v1/orgs/{self.org.pk}/files/{self.att.id}').status_code, 403)
         self.assertTrue(Attachment.objects.filter(pk=self.att.pk).exists())
 
+    def test_identity_documents_need_edit_permission_but_photos_do_not(self):
+        self.up([('nid.pdf', PDF + b'nid', 'application/pdf')], category='nid')
+        nid = Attachment.objects.get(category='nid')
+        u = User.objects.create_user('viewer2', password='x')
+        Membership.objects.create(organization=self.org, user=u, role='viewer')
+        c = Client(); c.force_login(u)
+        names = [f['fileName'] for f in c.get(self.url()).json()]
+        self.assertIn('a.jpg', names)                 # the photo is visible to a view-only role
+        self.assertNotIn('nid.pdf', names)            # the identity paper is hidden from the list ...
+        self.assertEqual(c.get(f'/api/v1/orgs/{self.org.pk}/files/{nid.id}/content').status_code, 403)    # ... and cannot be fetched
+        self.assertEqual(c.get(f'/api/v1/orgs/{self.org.pk}/files/{nid.id}').status_code, 403)
+        self.assertEqual(c.get(f'/api/v1/orgs/{self.org.pk}/files/{self.att.id}/content?variant=thumb').status_code, 200)
+        self.assertEqual(self.c.get(f'/api/v1/orgs/{self.org.pk}/files/{nid.id}/content').status_code, 200)    # an editor / admin can
+
     def test_entity_of_another_org_is_not_reachable_even_for_admin(self):
         other = Party.objects.create(organization=self.org2, kind='driver', name='Z')
         r = self.up([('a.pdf', PDF, 'application/pdf')], url=f'/api/v1/orgs/{self.org.pk}/tasin-drivers/{other.pk}/files')

@@ -31,6 +31,22 @@ def _org(org_id):
     return org
 
 
+def _can_edit(user, org, module):
+    try:
+        authorize_org(user, org, module, 'edit')
+        return True
+    except FinanceError:
+        return False
+
+
+def _view_allowed(user, org, att):
+    """View permission on the record's module; identity papers (NID, passport, licence) additionally need edit permission."""
+    module = svc.module_for(att)
+    authorize_org(user, org, module, 'view')
+    if att.category in svc.SENSITIVE_CATEGORIES and not _can_edit(user, org, module):
+        raise FinanceError('forbidden', 'Identity documents are restricted to users who can edit this record', status=403)
+
+
 def _attachment(org, file_id):
     att = Attachment.objects.filter(pk=file_id, organization=org).select_related('uploaded_by', 'party').first()
     if not att:
@@ -47,7 +63,7 @@ def _make_entity_routes(prefix, entity_type):
     @router.get(f'/orgs/{{org_id}}/{prefix}/{{pk}}/files', operation_id=f'list_files_{entity_type}')
     def list_files(request, org_id: int, pk: int):
         org = _org(org_id)
-        return svc.list_for(org, entity_type, pk)
+        return svc.list_for(org, entity_type, pk, include_sensitive=_can_edit(request.user, org, svc.ENTITIES[entity_type][1]))
 
     @router.post(f'/orgs/{{org_id}}/{prefix}/{{pk}}/files', operation_id=f'upload_files_{entity_type}')
     def upload_files(request, org_id: int, pk: int, files: List[UploadedFile] = File(...), kind: str = Form('document'),
@@ -103,7 +119,7 @@ def files_usage(request, org_id: int):
 def file_meta(request, org_id: int, file_id: str):
     org = _org(org_id)
     att = _attachment(org, file_id)
-    authorize_org(request.user, org, svc.module_for(att), 'view')
+    _view_allowed(request.user, org, att)
     return svc.to_dict(att, org.pk)
 
 
@@ -146,7 +162,7 @@ def file_content(request, org_id: int, file_id: str, variant: str = '', download
     filesystem: streamed here. Private caching only, never shared caches."""
     org = _org(org_id)
     att = _attachment(org, file_id)
-    authorize_org(request.user, org, svc.module_for(att), 'view')
+    _view_allowed(request.user, org, att)
     key, mime, name = svc.content_for(att, variant, bool(download))
     st = get_storage()
     if download:

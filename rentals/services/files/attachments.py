@@ -37,6 +37,8 @@ CATEGORIES = {
     'transaction': {'receipt', 'bill', 'voucher', 'other'},
 }
 PROFILE_ENTITIES = {'owner', 'driver', 'client', 'vehicle'}
+# identity papers: visible only to users who may EDIT the module (view-only roles never see or fetch them)
+SENSITIVE_CATEGORIES = {'nid', 'passport', 'license'}
 KINDS = {k for k, _ in Attachment.Kind.choices}
 DOC_MIME = {'application/pdf': 'pdf',
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
@@ -194,9 +196,11 @@ def to_dict(a, org_id=None):
     }
 
 
-def list_for(org, entity_type, pk):
+def list_for(org, entity_type, pk, include_sensitive=True):
     field, obj = get_entity(org, entity_type, pk)
     rows = Attachment.objects.filter(organization=org, **{field: obj.pk}).select_related('uploaded_by').order_by('kind', '-created_at')
+    if not include_sensitive:
+        rows = rows.exclude(category__in=SENSITIVE_CATEGORIES)
     return [to_dict(a, org.pk) for a in rows]
 
 
@@ -363,3 +367,17 @@ def usage(org):
             'bytesMain': total['size'] or 0, 'bytesVariants': variant_bytes, 'bytesTotal': (total['size'] or 0) + variant_bytes,
             'bytesOriginalUploaded': total['orig'] or 0, 'byModule': by_module, 'largest': largest,
             'failed': rows.filter(status='failed').count(), 'backend': get_storage().provider}
+
+
+NO_PHOTO = {'photoId': '', 'photoUrl': '', 'thumbUrl': ''}
+
+
+def profile_map(org, field):
+    """{record pk: photo urls} for every profile picture of `field` ('party' | 'vehicle') in one query, for list screens."""
+    out = {}
+    for pk, att_id, has_thumb in Attachment.objects.filter(organization=org, kind='profile', **{field + '__isnull': False}).values_list(field + '_id', 'id', 'status'):
+        if has_thumb != 'completed':
+            continue
+        base = f'/orgs/{org.pk}/files/{att_id}/content'
+        out[pk] = {'photoId': str(att_id), 'photoUrl': base + '?variant=large', 'thumbUrl': base + '?variant=thumb'}
+    return out

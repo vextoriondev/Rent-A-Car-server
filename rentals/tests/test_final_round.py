@@ -576,7 +576,7 @@ class PartialUpdateTests(TestCase):
 
     def test_vehicle_edit_keeps_unsent_fields(self):
         base = f'/api/v1/orgs/{self.org.pk}/tasin-vehicles'
-        r = self._json('post', base, {'registration': 'PU-1', 'model': 'Axio', 'brand': 'Toyota', 'year': 2019, 'category': 'SUV', 'color': 'Black', 'monthly_rent': 40000})
+        r = self._json('post', base, {'registration': 'PU-1', 'owner_id': Party.objects.create(organization=self.org, kind='owner', name='PUO').pk, 'model': 'Axio', 'brand': 'Toyota', 'year': 2019, 'category': 'SUV', 'color': 'Black', 'monthly_rent': 40000})
         self.assertEqual(r.status_code, 200, r.content)
         vid = r.json()['id']
         r = self._json('put', f'{base}/{vid}', {'registration': 'PU-1', 'model': 'Axio', 'brand': 'Toyota', 'monthly_rent': 42000})

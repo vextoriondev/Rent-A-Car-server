@@ -28,6 +28,7 @@ from ..services.tasin import (
     generate_organization_backup
 )
 from ..services import finance as fin
+from ..services.files.attachments import profile_map, NO_PHOTO
 from .tasin_auth import tasin_auth
 from ..services import garage as garage_svc
 from ..rbac import (
@@ -502,6 +503,7 @@ def dashboard_kpis(request, org_id: int, date_filter: str | None = None, period:
 def list_owners(request, org_id: int):
     org = _get_org(request, org_id)
     owners = Party.objects.filter(organization=org, kind=Party.Kind.OWNER).select_related('detail').prefetch_related('vehicles')
+    _ph = profile_map(org, 'party')
     out = []
     for o in owners:
         det = getattr(o, 'detail', None)
@@ -510,6 +512,7 @@ def list_owners(request, org_id: int):
         payable = det.total_payable_owner if det else total_rent
         paid = det.total_paid_owner if det else D(0)
         out.append({
+            **_ph.get(o.pk, NO_PHOTO),
             'id': str(o.pk),
             'ownerId': f'OWN-{o.pk:03d}',
             'name': o.name,
@@ -621,6 +624,7 @@ def delete_owner(request, org_id: int, owner_id: int):
 def list_vehicles(request, org_id: int):
     org = _get_org(request, org_id)
     vehicles = Vehicle.objects.filter(organization=org).select_related('owner', 'detail', 'detail__assigned_driver')
+    _ph = profile_map(org, 'vehicle')
     out = []
     for v in vehicles:
         det = getattr(v, 'detail', None)
@@ -628,6 +632,7 @@ def list_vehicles(request, org_id: int):
         if det and det.assigned_driver:
             driver_name = det.assigned_driver.name
         out.append({
+            **_ph.get(v.pk, NO_PHOTO),
             'id': str(v.pk),
             'vehicleId': f'VEH-{v.pk:03d}',
             'registration': v.registration,
@@ -656,21 +661,22 @@ def list_vehicles(request, org_id: int):
 @router.post('/orgs/{org_id}/tasin-vehicles')
 def create_vehicle(request, org_id: int, payload: VehicleInCustom):
     org = _get_org(request, org_id)
-    owner = Party.objects.filter(pk=payload.owner_id, organization=org).first() if payload.owner_id else None
+    # A vehicle belongs to a real owner chosen by the user: never the "first owner" or an invented one.
+    owner = Party.objects.filter(pk=payload.owner_id, organization=org, kind=Party.Kind.OWNER).first() if payload.owner_id else None
     if not owner:
-        owner = Party.objects.filter(organization=org, kind=Party.Kind.OWNER).first()
-        if not owner:
-            owner = Party.objects.create(organization=org, kind=Party.Kind.OWNER, name='Default Owner', phone='01700000000')
+        raise fin.FinanceError('owner_required', 'Choose the vehicle owner', status=422)
     driver = Party.objects.filter(pk=payload.driver_id, organization=org).first() if payload.driver_id else None
 
     reg = (payload.registration or payload.reg_no or '').strip()
     if not reg:
-        reg = f"DHA-METRO-GA-{(Vehicle.objects.count() + 1):02d}-1001"
+        raise fin.FinanceError('registration_required', 'Enter the registration number', status=422)
+    if Vehicle.objects.filter(organization=org, registration__iexact=reg).exists():
+        raise fin.FinanceError('duplicate_registration', f'A vehicle with registration {reg} already exists', status=409)
     with transaction.atomic():
         v = Vehicle.objects.create(
             organization=org,
             registration=reg,
-            model_name=payload.model.strip() or 'Car',
+            model_name=payload.model.strip(),
             owner=owner
         )
         VehicleDetail.objects.create(
@@ -761,16 +767,18 @@ def add_vehicle_paper(request, org_id: int, vehicle_id: int, payload: VehiclePap
 def list_drivers(request, org_id: int):
     org = _get_org(request, org_id)
     drivers = Party.objects.filter(organization=org, kind=Party.Kind.DRIVER).select_related('detail', 'detail__assigned_vehicle')
+    _ph = profile_map(org, 'party')
     out = []
     for d in drivers:
         det = getattr(d, 'detail', None)
         v_reg = det.assigned_vehicle.registration if det and det.assigned_vehicle else ''
-        salary = det.monthly_salary if det else D(18000)
+        salary = det.monthly_salary if det else D(0)
         paid = det.total_paid_driver if det else D(0)
         adv = fin.balance(d, fin.A.DRIVER_ADVANCE)
         fuel_gas = fin.balance(d, fin.A.DRIVER_FUEL_GAS)
         due = fin.driver_payable_for_dues(d)
         out.append({
+            **_ph.get(d.pk, NO_PHOTO),
             'id': str(d.pk),
             'driverId': f'DRV-{d.pk:03d}',
             'name': d.name,
@@ -899,12 +907,14 @@ def delete_driver(request, org_id: int, driver_id: int):
 def list_clients(request, org_id: int):
     org = _get_org(request, org_id)
     clients = Party.objects.filter(organization=org, kind=Party.Kind.CUSTOMER).select_related('detail')
+    _ph = profile_map(org, 'party')
     out = []
     for c in clients:
         det = getattr(c, 'detail', None)
         rec = det.total_receivable_client if det else D(0)
         col = det.total_collected_client if det else D(0)
         out.append({
+            **_ph.get(c.pk, NO_PHOTO),
             'id': str(c.pk),
             'clientId': f'CLT-{c.pk:03d}',
             'name': c.name,
