@@ -64,6 +64,12 @@ class FilesystemStorage:
     def signed_url(self, key, filename, content_type, expires, download):
         return None          # no direct links: the API streams the bytes after its own permission check
 
+    def mtime(self, key):
+        try:
+            return os.path.getmtime(self._path(key))
+        except OSError:
+            return None
+
     def iter_keys(self, prefix=''):
         base = self._path(prefix.rstrip('/')) if prefix else self.root
         for dirpath, _dirs, files in os.walk(base):
@@ -114,6 +120,12 @@ class S3Storage:
         disp = ('attachment' if download else 'inline') + '; filename="' + re.sub(r'[^A-Za-z0-9._ -]', '_', filename)[:120] + '"'
         return self.client.generate_presigned_url('get_object', ExpiresIn=expires, Params={
             'Bucket': self.bucket, 'Key': self._k(key), 'ResponseContentType': content_type, 'ResponseContentDisposition': disp})
+
+    def mtime(self, key):
+        try:
+            return self.client.head_object(Bucket=self.bucket, Key=self._k(key))['LastModified'].timestamp()
+        except Exception:
+            return None
 
     def iter_keys(self, prefix=''):
         paginator = self.client.get_paginator('list_objects_v2')

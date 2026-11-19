@@ -469,3 +469,26 @@ class S3BackendTests(Base):
             r = self.up([('a.pdf', PDF, 'application/pdf')])
         self.assertIn(r.status_code, (503, 500))
         self.mock.start()
+
+
+class CleanupCommandTests(Base):
+    def test_orphans_reported_and_deleted_only_when_old_enough(self):
+        from django.core.management import call_command
+        self.up([('a.pdf', PDF, 'application/pdf')])
+        st = get_storage()
+        st.put('org-1/driver/stray/file.pdf', b'x', 'application/pdf')
+        out = io.StringIO()
+        call_command('cleanup_orphan_files', '--delete', stdout=out)                 # too recent: untouched
+        self.assertTrue(st.exists('org-1/driver/stray/file.pdf'))
+        out = io.StringIO()
+        call_command('cleanup_orphan_files', '--delete', '--older-than-hours=0', stdout=out)
+        self.assertFalse(st.exists('org-1/driver/stray/file.pdf'))
+        self.assertTrue(st.exists(Attachment.objects.get().storage_key))            # referenced objects are never removed
+
+    def test_missing_objects_are_reported(self):
+        from django.core.management import call_command
+        self.up([('a.pdf', PDF, 'application/pdf')])
+        get_storage().delete(Attachment.objects.get().storage_key)
+        out = io.StringIO()
+        call_command('cleanup_orphan_files', stdout=out)
+        self.assertIn('missing from storage', out.getvalue())
