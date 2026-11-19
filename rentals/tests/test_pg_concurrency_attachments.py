@@ -105,7 +105,7 @@ class AttachmentConcurrencyTests(TransactionTestCase):
         self.assertEqual(r.status_code, 200)
         fid = r.json()['items'][0]['id']
         res = run_parallel(5, lambda i, c: c.delete(f'/api/v1/orgs/{self.org.pk}/files/{fid}').status_code)
-        self.assertEqual(sorted(res).count(200), 1, res)
+        self.assertEqual(res.count(200), 1, res)
         self.assertTrue(all(x in (200, 404) for x in res), res)
         self.assertEqual(Attachment.objects.count(), 0)
         self.assertEqual(self.stored_keys(), set())
@@ -117,8 +117,11 @@ class AttachmentConcurrencyTests(TransactionTestCase):
                 return 'deleted'
             return self.post(c, jpg((i, i, i)), kind='photo', entity='tasin-vehicles', idem=f'v{i}').status_code
         res = run_parallel(5, work)
-        self.assertFalse(Attachment.objects.filter(vehicle_id=self.car.pk).exists())     # FK cascade: no orphan rows
-        self.assertTrue(all(x in ('deleted', 200, 404, 409, 500) or isinstance(x, Exception) for x in res), res)
+        # Either the record was deleted (then no attachment may point at it) or it survived (then its attachments are legitimate): never a row without a record.
+        if not Vehicle.objects.filter(pk=self.car.pk).exists():
+            self.assertFalse(Attachment.objects.filter(vehicle_id=self.car.pk).exists())
+        self.assertEqual(Attachment.objects.exclude(vehicle__isnull=False).count(), 0)
+        self.assertEqual(self.stored_keys(), self.expected_keys())                      # and no storage object without a row
 
     def test_foreign_key_and_check_constraints_hold_on_postgres(self):
         from django.db import IntegrityError, transaction

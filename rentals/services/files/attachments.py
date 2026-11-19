@@ -232,7 +232,8 @@ def upload(org, user, entity_type, pk, *, filename, data, kind='document', categ
     old_keys = []
     try:
         with transaction.atomic():
-            type(entity).objects.select_for_update().filter(pk=entity.pk).first()      # serialize concurrent uploads for this record
+            if type(entity).objects.select_for_update().filter(pk=entity.pk).first() is None:      # serialize uploads per record; refuse a record deleted meanwhile
+                raise err('not_found', 'Record not found', status=404)
             existing = Attachment.objects.filter(organization=org, **{field: entity.pk})
             dup = existing.filter(sha256=sha, kind=kind).first()
             if dup:
@@ -250,6 +251,9 @@ def upload(org, user, entity_type, pk, *, filename, data, kind='document', categ
             audit(org, user, 'attachment.upload', entity_type, entity.pk, after={'attachment_id': str(att.id), 'name': att.original_name, 'kind': kind, 'category': category,
                                                                               'size_original': att.size_original, 'size_stored': att.size_stored, 'sha256': sha})
             transaction.on_commit(lambda: _delete_keys(old_keys))
+    except FinanceError:
+        _delete_keys(written)
+        raise
     except IntegrityError:
         _delete_keys(written)
         winner = Attachment.objects.filter(organization=org, upload_key=upload_key).first() if upload_key else None
@@ -325,6 +329,8 @@ def delete(org, user, att):
     info = {'attachment_id': str(att.id), 'name': att.original_name, 'kind': att.kind, 'category': att.category, 'sha256': att.sha256}
     etype, (_, pk) = _owner_type(att), att.owner_ref
     with transaction.atomic():
+        if not Attachment.objects.select_for_update().filter(pk=att.pk).exists():      # a concurrent delete already removed it
+            raise err('not_found', 'File not found', status=404)
         att.delete()
         audit(org, user, 'attachment.delete', etype, pk, before=info)
         transaction.on_commit(lambda: _delete_keys(keys))      # storage is touched only after the database commit succeeded

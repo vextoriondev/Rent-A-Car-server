@@ -276,6 +276,18 @@ class LifecycleTests(Base):
         self.assertTrue(get_storage().exists(b.storage_key))
         self.assertTrue(AuditEvent.objects.filter(action='attachment.delete').exists())
 
+    def test_deleting_an_already_deleted_file_is_404_and_audited_once(self):
+        self.up([('a.pdf', PDF, 'application/pdf')])
+        a = Attachment.objects.get()
+        stale = Attachment.objects.get(pk=a.pk)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.assertEqual(self.c.delete(f'/api/v1/orgs/{self.org.pk}/files/{a.id}').status_code, 200)
+        self.assertEqual(self.c.delete(f'/api/v1/orgs/{self.org.pk}/files/{a.id}').status_code, 404)
+        from rentals.services.files import attachments as svc_
+        with self.assertRaises(Exception):
+            svc_.delete(self.org, self.admin, stale)                       # a stale in-memory copy cannot delete twice
+        self.assertEqual(AuditEvent.objects.filter(action='attachment.delete').count(), 1)
+
     def test_storage_failure_on_delete_does_not_break_the_database_decision(self):
         self.up([('a.pdf', PDF, 'application/pdf')])
         a = Attachment.objects.get()
