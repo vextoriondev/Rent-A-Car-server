@@ -128,7 +128,7 @@ class VehicleInCustom(Schema):
     registration_date: Optional[Date] = None
     owner_id: Optional[int] = None
     driver_id: Optional[int] = None
-    monthly_rent: Decimal = D(50000)
+    monthly_rent: Decimal = D(0)
     status: Literal['Available', 'On Duty', 'In Garage', 'Inactive'] = 'Available'
 
 class VehiclePaperIn(Schema):
@@ -506,7 +506,7 @@ def list_owners(request, org_id: int):
     for o in owners:
         det = getattr(o, 'detail', None)
         v_count = o.vehicles.count()
-        total_rent = sum(getattr(v, 'detail', None) and v.detail.monthly_rent or 50000 for v in o.vehicles.all())
+        total_rent = sum((getattr(v, 'detail', None) and v.detail.monthly_rent) or D(0) for v in o.vehicles.all())
         payable = det.total_payable_owner if det else total_rent
         paid = det.total_paid_owner if det else D(0)
         out.append({
@@ -645,7 +645,7 @@ def list_vehicles(request, org_id: int):
             'owner': v.owner.name,
             'driverId': str(det.assigned_driver_id) if det and det.assigned_driver_id else '',
             'driver': driver_name,
-            'monthlyRent': float(det.monthly_rent if det else 50000),
+            'monthlyRent': float(det.monthly_rent if det else 0),
             'mobilCount': det.mobil_count if det else 0,
             'lastMobilDate': det.last_mobil_date.isoformat() if det and det.last_mobil_date else '',
             'agreementStart': det.agreement_start.isoformat() if det and det.agreement_start else '',
@@ -1918,7 +1918,7 @@ def search_vehicles_global(request, org_id: int, q: str = ''):
         'owner': v.owner.name,
         'driver': getattr(v, 'detail', None) and v.detail.assigned_driver and v.detail.assigned_driver.name or 'Unassigned',
         'status': getattr(v, 'detail', None) and v.detail.status or 'Available',
-        'monthlyRent': float(getattr(v, 'detail', None) and v.detail.monthly_rent or 50000)
+        'monthlyRent': float((getattr(v, 'detail', None) and v.detail.monthly_rent) or 0)
     } for v in qs]
 
 @router.get('/orgs/{org_id}/tasin-vehicle-search/{vehicle_id}/statement')
@@ -1934,7 +1934,7 @@ def vehicle_full_statement(request, org_id: int, vehicle_id: int):
 
     total_duty_income = sum(d.total_amount for d in duties.filter(status='Completed'))
     total_maintenance = sum(m.total_cost for m in maintenances)
-    owner_rent = det.monthly_rent if det else D(50000)
+    owner_rent = det.monthly_rent if det else D(0)
 
     return {
         'vehicle': {
