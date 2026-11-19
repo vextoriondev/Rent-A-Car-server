@@ -15,6 +15,7 @@ from .idempotency import IdempotencyRecord
 from .preferences import UserPreference
 from .finance import PartyLedgerEntry, SalaryPayment, RentAccrual, ReplacementAssignment, TasinAgreement
 from .garage import GarageLedgerEntry, FinanceSettings, LoginThrottle
+from .attachments import Attachment
 from .tasin import (
     VehicleDetail, PartyDetail, Duty, Garage, MaintenanceRecord, VehiclePaper,
     FinancialAccount, AccountTransaction, SystemAlert, CompanyProfile,
@@ -24,7 +25,7 @@ from .tasin import (
     UserProfile, UserModulePermission, AccessRequest
 )
 
-__all__ = ['uid','Organization','Branch','Membership','Party','Contact','PartyUser','Vehicle','Agreement','DriverAgreement','DriverAgreementVersion','VehicleOwnership','DriverAssignment','AgreementVersion','Period','Obligation',
+__all__ = ['Attachment','uid','Organization','Branch','Membership','Party','Contact','PartyUser','Vehicle','Agreement','DriverAgreement','DriverAgreementVersion','VehicleOwnership','DriverAssignment','AgreementVersion','Period','Obligation',
     'Expense','OwnerOffset','ExpenseCategory','ExpenseRule','Approval','Payment','Allocation','OrgSettings','Settlement','SettlementLine','MaintenanceCase','Document','AuditEvent','Account','JournalEntry','JournalLine','Charge','Invoice','InvoiceLine','InvoiceSequence',
     'NotificationOutbox','NotificationDelivery','IdempotencyRecord','UserPreference',
     'VehicleDetail','PartyDetail','Duty','Garage','MaintenanceRecord','VehiclePaper','FinancialAccount','AccountTransaction','SystemAlert','CompanyProfile',

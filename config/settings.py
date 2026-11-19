@@ -82,3 +82,29 @@ EMAIL_TIMEOUT = int(os.environ.get('EMAIL_TIMEOUT','10'))
 # How queued SMS/email notices are sent (rentals/services/notify.py): thread (default, no broker needed) | celery | inline | off. Tests send inline.
 NOTICE_DELIVERY = os.environ.get('NOTICE_DELIVERY') or ('inline' if 'test' in sys.argv else 'thread')
 if 'test' in sys.argv: RESEND_API_KEY = ''   # a test run must never send a real email, whatever .env.local holds
+
+
+# ── Files & media (rentals/services/files) ──────────────────────────────────────────────────────────────────────────────
+# Bytes never go into PostgreSQL. FILE_STORAGE_BACKEND=s3 (Cloudflare R2, AWS S3, any S3-compatible service) is the production
+# setting; `filesystem` writes under PRIVATE_MEDIA_ROOT (a mounted volume) and is meant for development / a single server.
+FILE_STORAGE_BACKEND = os.environ.get('FILE_STORAGE_BACKEND') or ('s3' if os.environ.get('S3_BUCKET') else 'filesystem')
+S3_BUCKET = os.environ.get('S3_BUCKET', '')
+S3_ENDPOINT_URL = os.environ.get('S3_ENDPOINT_URL', '')            # R2: https://<account>.r2.cloudflarestorage.com
+S3_ACCESS_KEY_ID = os.environ.get('S3_ACCESS_KEY_ID', '')
+S3_SECRET_ACCESS_KEY = os.environ.get('S3_SECRET_ACCESS_KEY', '')
+S3_REGION = os.environ.get('S3_REGION', 'auto')
+S3_KEY_PREFIX = os.environ.get('S3_KEY_PREFIX', 'tasin')
+FILE_SIGNED_URL_TTL = int(os.environ.get('FILE_SIGNED_URL_TTL', '300'))   # seconds a signed download link stays valid
+# Upload limits (checked again on the server; the browser only mirrors them). Megabytes unless stated.
+ATTACH_MAX_IMAGE_MB = int(os.environ.get('ATTACH_MAX_IMAGE_MB', '15'))
+ATTACH_MAX_PDF_MB = int(os.environ.get('ATTACH_MAX_PDF_MB', '10'))
+ATTACH_MAX_DOC_MB = int(os.environ.get('ATTACH_MAX_DOC_MB', '10'))
+ATTACH_MAX_FILES = int(os.environ.get('ATTACH_MAX_FILES', '10'))
+ATTACH_MAX_TOTAL_MB = int(os.environ.get('ATTACH_MAX_TOTAL_MB', '40'))
+ATTACH_MAX_PIXELS = int(os.environ.get('ATTACH_MAX_PIXELS', str(60_000_000)))   # decompression-bomb guard
+# Image optimization. Photos are stored only as WebP variants; scans of documents also keep the original and use a higher quality.
+ATTACH_PHOTO_QUALITY = int(os.environ.get('ATTACH_PHOTO_QUALITY', '78'))
+ATTACH_DOC_QUALITY = int(os.environ.get('ATTACH_DOC_QUALITY', '90'))
+ATTACH_VARIANT_SIZES = {'thumb': 240, 'medium': 900, 'large': 1600}      # longest side in pixels, never upscaled
+ATTACH_DOC_LARGE_SIZE = int(os.environ.get('ATTACH_DOC_LARGE_SIZE', '2200'))
+FILE_UPLOAD_MAX_MEMORY_SIZE = 2 * 1024 * 1024    # bigger uploads stream to a temp file instead of RAM

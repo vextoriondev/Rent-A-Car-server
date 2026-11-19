@@ -4,11 +4,11 @@ from ninja.security import django_auth
 from ..services.helpers import DomainError
 from ..services.finance import FinanceError
 from .errors import ApiError
-from . import auth, parties, agreements, expenses, payments, notifications, snapshot, billing, settlements, documents, reports, driver_agreements, portal, tasin, finance
+from . import auth, parties, agreements, expenses, payments, notifications, snapshot, billing, settlements, documents, reports, driver_agreements, portal, tasin, finance, attachments
 
 api=NinjaAPI(auth=django_auth,title='RentFlow API',version='1.0.0')
 
-for module in (auth, parties, agreements, expenses, payments, notifications, snapshot, billing, settlements, documents, reports, driver_agreements, portal, tasin, finance):
+for module in (auth, parties, agreements, expenses, payments, notifications, snapshot, billing, settlements, documents, reports, driver_agreements, portal, tasin, finance, attachments):
     api.add_router('',module.router)
 
 

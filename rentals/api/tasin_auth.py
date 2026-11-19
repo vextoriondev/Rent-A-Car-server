@@ -52,6 +52,8 @@ RULES = [
     (r'^tasin-settings/company$', ANY_MEMBER),          # company name/logo is needed on every screen
     (r'^tasin-settings(/|$)', 'settings'),
     (r'^backup(/|$)', 'settings'),
+    (r'^files-usage$', 'settings'),
+    (r'^files(-limits)?(/|$)', ANY_MEMBER),            # the handler checks the module of the file's own record (owners, drivers, vehicles, ...)
     (r'^(documents|private-documents|agreements)(/|$)', 'agreements'),
     (r'^(access-requests|rbac)(/|$)', ANY_MEMBER),      # a user without a module asks for it here; handlers check admin rights themselves
 ]
