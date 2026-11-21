@@ -287,6 +287,8 @@ def can_admin_manage_target_user(admin_user, target_user, org: Organization) -> 
       - Main Admin cannot promote to Super Admin or modify a Super Admin.
       - Main Admin can manage standard employees within delegated authority.
     """
+    if org is not None and not Membership.objects.filter(user=target_user, organization=org).exists():
+        return False        # defence in depth: nobody manages a user who is not a member of this organization
     if is_super_admin(admin_user, org):
         return True
     if not is_main_admin(admin_user, org):

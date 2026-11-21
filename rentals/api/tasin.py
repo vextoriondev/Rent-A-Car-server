@@ -3,7 +3,7 @@ from datetime import date, datetime
 from typing import Literal, Optional, List, Dict, Any
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Sum, Q
+from django.db.models import Sum, Q, ProtectedError
 from django.http import HttpRequest
 from ninja import Router, Schema
 from django.utils import timezone
@@ -658,6 +658,27 @@ def list_vehicles(request, org_id: int):
         })
     return out
 
+def _link_driver_vehicle(vehicle, driver):
+    """Keep both sides of a driver <-> vehicle assignment in step. A vehicle has one driver and a driver one vehicle:
+    any earlier link of either one is released, so the Vehicles and Drivers screens always agree."""
+    vdet, _ = VehicleDetail.objects.get_or_create(vehicle=vehicle)
+    ddet, _ = PartyDetail.objects.get_or_create(party=driver)
+    VehicleDetail.objects.filter(assigned_driver=driver).exclude(vehicle=vehicle).update(assigned_driver=None)
+    PartyDetail.objects.filter(assigned_vehicle=vehicle).exclude(party=driver).update(assigned_vehicle=None)
+    vdet.assigned_driver = driver
+    vdet.save(update_fields=['assigned_driver'])
+    ddet.assigned_vehicle = vehicle
+    ddet.save(update_fields=['assigned_vehicle'])
+
+
+def _org_party(org, pk, kind, label):
+    """A party of this organization and kind, or a clear 422. Ids from a request are never trusted."""
+    p = Party.objects.filter(pk=pk, organization=org, kind=kind).first()
+    if not p:
+        raise fin.FinanceError(f'{label}_not_found', f'The chosen {label} was not found', status=422)
+    return p
+
+
 @router.post('/orgs/{org_id}/tasin-vehicles')
 def create_vehicle(request, org_id: int, payload: VehicleInCustom):
     org = _get_org(request, org_id)
@@ -665,7 +686,7 @@ def create_vehicle(request, org_id: int, payload: VehicleInCustom):
     owner = Party.objects.filter(pk=payload.owner_id, organization=org, kind=Party.Kind.OWNER).first() if payload.owner_id else None
     if not owner:
         raise fin.FinanceError('owner_required', 'Choose the vehicle owner', status=422)
-    driver = Party.objects.filter(pk=payload.driver_id, organization=org).first() if payload.driver_id else None
+    driver = _org_party(org, payload.driver_id, Party.Kind.DRIVER, 'driver') if payload.driver_id else None
 
     reg = (payload.registration or payload.reg_no or '').strip()
     if not reg:
@@ -694,6 +715,8 @@ def create_vehicle(request, org_id: int, payload: VehicleInCustom):
             agreement_start=date.today(),
             assigned_driver=driver
         )
+        if driver:
+            _link_driver_vehicle(v, driver)
     return {'id': str(v.pk), 'vehicleId': f'VEH-{v.pk:03d}', 'registration': v.registration, 'success': True}
 
 @router.put('/orgs/{org_id}/tasin-vehicles/{vehicle_id}')
@@ -701,10 +724,15 @@ def update_vehicle(request, org_id: int, vehicle_id: int, payload: VehicleInCust
     org = _get_org(request, org_id)
     v = Vehicle.objects.filter(pk=vehicle_id, organization=org).first()
     if not v: raise ApiError(404, 'Vehicle not found')
-    v.registration = payload.registration.strip()
+    new_reg = (payload.registration or payload.reg_no or '').strip()
+    if new_reg and new_reg.lower() != v.registration.lower() and Vehicle.objects.filter(organization=org, registration__iexact=new_reg).exclude(pk=v.pk).exists():
+        raise fin.FinanceError('duplicate_registration', f'A vehicle with registration {new_reg} already exists', status=409)
+    if new_reg:
+        v.registration = new_reg
     v.model_name = payload.model.strip() or v.model_name
     if payload.owner_id:
-        v.owner_id = payload.owner_id
+        v.owner = _org_party(org, payload.owner_id, Party.Kind.OWNER, 'owner')
+    driver = _org_party(org, payload.driver_id, Party.Kind.DRIVER, 'driver') if payload.driver_id else None
     v.save()
     det, _ = VehicleDetail.objects.get_or_create(vehicle=v)
     sent = payload.model_fields_set   # only fields the client actually sent are changed; an edit form must not reset the rest to defaults
@@ -715,9 +743,9 @@ def update_vehicle(request, org_id: int, vehicle_id: int, payload: VehicleInCust
     if 'color' in sent: det.color = payload.color
     if 'status' in sent: det.status = payload.status
     if 'monthly_rent' in sent: det.monthly_rent = payload.monthly_rent
-    if payload.driver_id:
-        det.assigned_driver_id = payload.driver_id
     det.save()
+    if driver:
+        _link_driver_vehicle(v, driver)
     return {'id': str(v.pk), 'success': True}
 
 @router.delete('/orgs/{org_id}/tasin-vehicles/{vehicle_id}')
@@ -809,6 +837,8 @@ def list_drivers(request, org_id: int):
 def create_driver(request, org_id: int, payload: DriverIn):
     org = _get_org(request, org_id)
     veh = Vehicle.objects.filter(pk=payload.assigned_vehicle_id, organization=org).first() if payload.assigned_vehicle_id else None
+    if payload.assigned_vehicle_id and not veh:
+        raise fin.FinanceError('vehicle_not_found', 'The chosen vehicle was not found', status=422)
     with transaction.atomic():
         d = Party.objects.create(
             organization=org,
@@ -835,6 +865,8 @@ def create_driver(request, org_id: int, payload: DriverIn):
             status=payload.status,
             assigned_vehicle=veh
         )
+        if veh:
+            _link_driver_vehicle(veh, d)
         actor = _resolve_actor(request, org)
         od = payload.opening_balance_date
         if payload.advance and payload.advance > 0:
@@ -865,9 +897,14 @@ def update_driver(request, org_id: int, driver_id: int, payload: DriverIn):
     if 'monthly_salary' in sent: det.monthly_salary = payload.monthly_salary
     if 'daily_allowance' in sent: det.daily_allowance = payload.daily_allowance
     if 'status' in sent: det.status = payload.status
+    veh = None
     if payload.assigned_vehicle_id:
-        det.assigned_vehicle_id = payload.assigned_vehicle_id
+        veh = Vehicle.objects.filter(pk=payload.assigned_vehicle_id, organization=org).first()
+        if not veh:
+            raise fin.FinanceError('vehicle_not_found', 'The chosen vehicle was not found', status=422)
     det.save()
+    if veh:
+        _link_driver_vehicle(veh, d)
     return {'id': str(d.pk), 'success': True}
 
 @router.post('/orgs/{org_id}/tasin-drivers/{driver_id}/payments')
@@ -1073,7 +1110,11 @@ def delete_client(request, org_id: int, client_id: int):
     org = _get_org(request, org_id)
     c = Party.objects.filter(pk=client_id, organization=org, kind=Party.Kind.CUSTOMER).first()
     if not c: raise ApiError(404, 'Client not found')
-    c.delete()
+    try:
+        with transaction.atomic():
+            c.delete()
+    except ProtectedError:
+        raise fin.FinanceError('client_in_use', 'This client has invoices, collections or ledger history and cannot be deleted. Set the client to Inactive instead.', status=409)
     return {'success': True, 'id': str(client_id)}
 
 # ─── INVOICE ENGINE ENDPOINTS (Module 05 & 06) ────────────────────────────────
@@ -1166,8 +1207,13 @@ def create_invoice(request, org_id: int, payload: InvoiceCreateIn):
                     total_price=tot
                 )
 
+        if payload.discount < 0 or payload.tax < 0:
+            raise fin.FinanceError('invalid_amount', 'Discount and tax cannot be negative')
+        if payload.discount > subtotal + payload.tax:
+            # never silently clamp to zero: the invoice would show a discount that was not really given
+            raise fin.FinanceError('discount_exceeds_total', f'The discount (৳{payload.discount}) is larger than the invoice amount (৳{subtotal + payload.tax})')
         inv.subtotal = subtotal
-        inv.total_amount = max(D(0), subtotal - payload.discount + payload.tax)
+        inv.total_amount = subtotal - payload.discount + payload.tax
         inv.save()
 
         # Update client receivable
@@ -1245,7 +1291,10 @@ def record_invoice_payment(request, org_id: int, invoice_id: int, payload: Invoi
         if payload.account_id:
             account = FinancialAccount.objects.select_for_update().filter(pk=payload.account_id, organization=org).first()
         if not account:
-            account = FinancialAccount.objects.select_for_update().filter(organization=org, is_active=True).first()
+            # no account chosen: use the first active account of the kind that matches the payment method (Cash / Bank / Mobile Banking)
+            want = {'Cash': 'Cash', 'Bank Transfer': 'Bank', 'Mobile Banking': 'Mobile Banking'}.get(payload.payment_method)
+            qs = FinancialAccount.objects.select_for_update().filter(organization=org, is_active=True)
+            account = (qs.filter(account_type=want).first() if want else None) or qs.first()
 
         if account:
             account.current_balance += payload.amount
@@ -1278,7 +1327,7 @@ def record_invoice_payment(request, org_id: int, invoice_id: int, payload: Invoi
         # Record transaction in accounts ledger
         AccountTransaction.objects.create(
             organization=org,
-            transaction_id=f"TXN-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            transaction_id=fin.new_txn_id('TXN'),     # unique: a per-second timestamp collided when several receipts were posted in the same second
             date=payload.date,
             transaction_type='Income',
             category='Customer Collection',
@@ -1782,6 +1831,7 @@ def transfer_money(request, org_id: int, payload: TransferIn):
     from_acc = FinancialAccount.objects.filter(pk=payload.from_account_id, organization=org).first()
     to_acc = FinancialAccount.objects.filter(pk=payload.to_account_id, organization=org).first()
     if not from_acc or not to_acc: raise ApiError(404, 'Account not found')
+    if from_acc.pk == to_acc.pk: raise ApiError(422, 'Choose two different accounts for a transfer')
     if from_acc.current_balance < payload.amount: raise ApiError(422, 'Insufficient funds')
 
     with transaction.atomic():
@@ -2300,7 +2350,7 @@ def update_user_profile(request, org_id: int, user_id: int, payload: UserProfile
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
     User = get_user_model()
-    target_user = User.objects.filter(pk=user_id).first()
+    target_user = User.objects.filter(pk=user_id, rentflow_memberships__organization=org).first()      # only members of THIS organization: ids of other tenants' users are 404
     if not target_user:
         raise ApiError(404, 'User not found')
 
@@ -2405,7 +2455,7 @@ def reset_user_password(request, org_id: int, user_id: int, payload: UserPasswor
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
     User = get_user_model()
-    target_user = User.objects.filter(pk=user_id).first()
+    target_user = User.objects.filter(pk=user_id, rentflow_memberships__organization=org).first()      # only members of THIS organization: ids of other tenants' users are 404
     if not target_user:
         raise ApiError(404, 'User not found')
 
@@ -2431,12 +2481,14 @@ def delete_system_user(request, org_id: int, user_id: int):
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
     User = get_user_model()
-    target_user = User.objects.filter(pk=user_id).first()
+    target_user = User.objects.filter(pk=user_id, rentflow_memberships__organization=org).first()      # only members of THIS organization: ids of other tenants' users are 404
     if not target_user:
         raise ApiError(404, 'User not found')
 
     if not can_admin_manage_target_user(actor, target_user, org):
         raise ApiError(403, 'Permission denied: cannot deactivate this user')
+    if actor and target_user.pk == actor.pk:
+        raise ApiError(422, 'You cannot deactivate your own account')
 
     with transaction.atomic():
         Membership.objects.filter(organization=org, user=target_user).delete()
@@ -2466,7 +2518,7 @@ def get_user_permissions_matrix(request, org_id: int, user_id: int):
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
     User = get_user_model()
-    target_user = User.objects.filter(pk=user_id).first()
+    target_user = User.objects.filter(pk=user_id, rentflow_memberships__organization=org).first()      # only members of THIS organization: ids of other tenants' users are 404
     if not target_user:
         raise ApiError(404, 'User not found')
     if target_user.pk != actor.pk and not (is_super_admin(actor, org) or is_main_admin(actor, org)):
@@ -2493,7 +2545,7 @@ def update_user_permissions_matrix(request, org_id: int, user_id: int, payload: 
     org = _get_org(request, org_id)
     actor = _resolve_actor(request, org)
     User = get_user_model()
-    target_user = User.objects.filter(pk=user_id).first()
+    target_user = User.objects.filter(pk=user_id, rentflow_memberships__organization=org).first()      # only members of THIS organization: ids of other tenants' users are 404
     if not target_user:
         raise ApiError(404, 'User not found')
 

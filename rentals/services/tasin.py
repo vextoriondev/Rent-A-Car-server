@@ -251,7 +251,7 @@ def generate_system_alerts(org: Organization, target_date=None):
         if days_left <= 30:
             sev = 'danger' if days_left < 0 else ('warning' if days_left <= 7 else 'info')
             t_str = 'Expired' if days_left < 0 else f'Expiring in {days_left}d'
-            title = f"{p.get_paper_type_display()} {t_str} – {p.vehicle.reg_no}"
+            title = f"{p.get_paper_type_display()} {t_str} – {p.vehicle.registration}"
             if not SystemAlert.objects.filter(organization=org, title=title).exists():
                 count = SystemAlert.objects.filter(organization=org).count() + 1
                 SystemAlert.objects.create(
@@ -263,7 +263,7 @@ def generate_system_alerts(org: Organization, target_date=None):
                     detail=f"Certificate #{p.paper_number} expired on {p.expiry_date}" if days_left < 0 else f"Certificate #{p.paper_number} expires on {p.expiry_date}",
                     date=target_date,
                     due_date=p.expiry_date,
-                    related_id=p.vehicle.reg_no
+                    related_id=p.vehicle.registration
                 )
 
     # 2. Driver License expiry
@@ -333,7 +333,7 @@ def calculate_vehicle_profitability(org: Organization, start_date=None, end_date
     Module 14: Vehicle Profitability Report
     Net Profit = Duty Income - (Maintenance + Fuel + Mobil + Driver Allowance + Owner Rent + Other Expenses)
     """
-    vehicles = Vehicle.objects.filter(organization=org).select_related('detail')
+    vehicles = Vehicle.objects.filter(organization=org).select_related('detail', 'owner')
     records = []
     
     total_income = D(0)
@@ -346,11 +346,12 @@ def calculate_vehicle_profitability(org: Organization, start_date=None, end_date
     for v in vehicles:
         reg = v.registration
         det = getattr(v, 'detail', None)
-        owner_name = v.ownerships.filter(effective_to__isnull=True).values_list('owner__name', flat=True).first() or 'Company Fleet'
+        owner_name = (v.ownerships.filter(effective_to__isnull=True).values_list('owner__name', flat=True).first()
+                      or (v.owner.name if v.owner_id else '') or 'Company Fleet')
         monthly_rent = det.monthly_rent if det else D(0)
         
         # 1. Duty income & driver allowance from completed/running duties
-        duties_qs = Duty.objects.filter(organization=org, vehicle=v)
+        duties_qs = Duty.objects.filter(organization=org, vehicle=v, status__in=['Completed', 'Running'])     # cancelled / not yet started duties earn nothing
         if start_date:
             duties_qs = duties_qs.filter(date__gte=start_date)
         if end_date:
