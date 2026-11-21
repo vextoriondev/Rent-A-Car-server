@@ -217,7 +217,8 @@ class ValidationTests(Base):
         self.assertEqual(body['errors'][0]['fileName'], 'bad.jpg')
 
     def test_unknown_category_and_profile_on_agreement_rejected(self):
-        self.assertEqual(self.up([('a.pdf', PDF, 'application/pdf')], category='nonsense').status_code, 400)
+        self.assertEqual(self.up([('a.pdf', PDF, 'application/pdf')], category='<b>x</b>').status_code, 400)
+        self.assertEqual(self.up([('a.jpg', jpeg(100, 100), 'image/jpeg')], kind='photo', category='nonsense').status_code, 400)    # photos keep the fixed list
         r = self.up([('p.jpg', jpeg(100, 100), 'image/jpeg')], kind='profile', url=self.url('tasin-agreements'))
         self.assertEqual(r.status_code, 400)
 
@@ -590,3 +591,20 @@ class CentralDocumentsTests(Base):
         reg = Attachment.objects.get(original_name='reg.pdf')
         r = c.post(f'{self.base}/{reg.id}/replace', {'file': SimpleUploadedFile('x.pdf', PDF + b'x', content_type='application/pdf')})
         self.assertEqual(r.status_code, 403)
+
+
+class CustomDocumentTypeTests(Base):
+    def test_user_typed_document_type_is_kept_and_filterable(self):
+        r = self.up([('g.pdf', PDF + b'g', 'application/pdf')], category='  Bank   Guarantee ')
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(r.json()['items'][0]['category'], 'bank guarantee')
+        got = self.c.get(f'/api/v1/orgs/{self.org.pk}/files?category=bank guarantee').json()
+        self.assertEqual([i['fileName'] for i in got['items']], ['g.pdf'])
+        att = Attachment.objects.get()
+        r = self.c.patch(f'/api/v1/orgs/{self.org.pk}/files/{att.id}', json.dumps({'category': 'Lease Letter'}), content_type='application/json')
+        self.assertEqual(r.json()['category'], 'lease letter')
+        self.assertEqual(self.c.patch(f'/api/v1/orgs/{self.org.pk}/files/{att.id}', json.dumps({'category': 'x' * 60}), content_type='application/json').status_code, 400)
+
+    def test_typing_an_identity_type_does_not_bypass_the_privacy_rule(self):
+        self.up([('n.pdf', PDF + b'n', 'application/pdf')], category='NID')
+        self.assertEqual(Attachment.objects.get().category, 'nid')

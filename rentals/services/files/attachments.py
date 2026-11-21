@@ -169,6 +169,19 @@ def _delete_keys(keys):
             log.warning('could not delete storage object %s', k)
 
 
+CUSTOM_TYPE = re.compile(r'^[\w][\w ()/.\-]{0,38}$', re.UNICODE)
+
+
+def norm_category(entity_type, category, kind='document'):
+    """A known category, or (documents only) a document type the user typed himself, e.g. "Bank guarantee"."""
+    category = re.sub(r'\s+', ' ', (category or '').strip().lower())
+    if not category or category in CATEGORIES[entity_type]:
+        return category
+    if kind == 'document' and CUSTOM_TYPE.match(category):
+        return category
+    raise err('invalid_category', 'Unknown attachment category')
+
+
 def validate_request(entity_type, kind, category):
     if entity_type not in ENTITIES:
         raise err('unknown_entity', 'Unsupported record type')
@@ -176,10 +189,7 @@ def validate_request(entity_type, kind, category):
         raise err('invalid_kind', 'Unknown attachment kind')
     if kind == 'profile' and entity_type not in PROFILE_ENTITIES:
         raise err('no_profile_picture', 'This record has no profile picture')
-    category = (category or '').strip().lower()
-    if category and category not in CATEGORIES[entity_type]:
-        raise err('invalid_category', 'Unknown attachment category')
-    return category
+    return norm_category(entity_type, category, kind)
 
 
 def to_dict(a, org_id=None):
@@ -294,10 +304,7 @@ def module_for(att):
 def update_meta(org, user, att, description=None, category=None):
     before = {'description': att.description, 'category': att.category}
     if category is not None:
-        category = category.strip().lower()
-        if category and category not in CATEGORIES[_owner_type(att)]:
-            raise err('invalid_category', 'Unknown attachment category')
-        att.category = category
+        att.category = norm_category(_owner_type(att), category, att.kind)
     if description is not None:
         att.description = description.strip()[:500]
     att.save()
@@ -450,7 +457,7 @@ def central_list(org, modules_view, modules_edit, *, entity=None, entity_id=None
         rows = rows.filter(category=category)
     q = (q or '').strip()
     if q:
-        rows = rows.filter(Q(original_name__icontains=q) | Q(description__icontains=q) | Q(party__name__icontains=q) | Q(vehicle__registration__icontains=q)
+        rows = rows.filter(Q(original_name__icontains=q) | Q(description__icontains=q) | Q(category__icontains=q) | Q(party__name__icontains=q) | Q(vehicle__registration__icontains=q)
                            | Q(agreement__title__icontains=q) | Q(transaction__reference__icontains=q))
     total = rows.count()
     rows = rows.select_related('uploaded_by', 'party', 'vehicle', 'vehicle__detail', 'agreement', 'maintenance', 'maintenance__vehicle', 'transaction')
