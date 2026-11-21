@@ -8,7 +8,7 @@ import uuid
 import zipfile
 from django.conf import settings
 from django.db import IntegrityError, OperationalError, ProgrammingError, transaction
-from django.db.models import Sum, Count
+from django.db.models import Sum, Count, Q
 from ...models import Attachment, Party, Vehicle, TasinAgreement, MaintenanceRecord, AccountTransaction
 from ..audit import audit
 from ..finance import FinanceError
@@ -394,3 +394,85 @@ def profile_map(org, field):
         base = f'/orgs/{org.pk}/files/{att_id}/content'
         out[pk] = {'photoId': str(att_id), 'photoUrl': base + '?variant=large', 'thumbUrl': base + '?variant=thumb'}
     return out
+
+
+ENTITY_Q = {'owner': Q(party__kind='owner'), 'driver': Q(party__kind='driver'), 'client': Q(party__kind='customer'),
+            'vehicle': Q(vehicle__isnull=False), 'agreement': Q(agreement__isnull=False), 'maintenance': Q(maintenance__isnull=False),
+            'transaction': Q(transaction__isnull=False)}
+ENTITY_FK = {'owner': 'party', 'driver': 'party', 'client': 'party', 'vehicle': 'vehicle', 'agreement': 'agreement', 'maintenance': 'maintenance', 'transaction': 'transaction'}
+
+
+def entity_info(att):
+    """-> (type, id, name, detail): which record a file belongs to, in words a person recognizes."""
+    et = _owner_type(att)
+    if et in ('owner', 'driver', 'client'):
+        p = att.party
+        return et, p.pk, p.name, p.phone or ''
+    if et == 'vehicle':
+        v = att.vehicle
+        try:
+            model = v.detail.model
+        except Exception:
+            model = ''
+        return et, v.pk, v.registration, model or ''
+    if et == 'agreement':
+        a = att.agreement
+        return et, a.pk, a.title, ''
+    if et == 'maintenance':
+        m = att.maintenance
+        return et, m.pk, m.service_type, m.vehicle.registration if m.vehicle_id else ''
+    t = att.transaction
+    return et, t.pk, t.reference or (t.description or '')[:60] or f'Transaction {t.pk}', ''
+
+
+def central_list(org, modules_view, modules_edit, *, entity=None, entity_id=None, category=None, kind='document', q='', limit=100, offset=0):
+    """Every file of the organization for the central Documents screen. `modules_view` / `modules_edit` are the RBAC modules the caller
+    may view / edit: records of other modules are not listed, identity papers need edit."""
+    allowed = [et for et, (_f, mod, _q) in ENTITIES.items() if mod in modules_view]
+    if entity:
+        if entity not in ENTITIES:
+            raise err('unknown_entity', 'Unsupported record type')
+        allowed = [et for et in allowed if et == entity]
+    scope = Q(pk__in=[])
+    for et in allowed:
+        part = ENTITY_Q[et]
+        if entity_id:
+            part = part & Q(**{ENTITY_FK[et] + '_id': entity_id})
+        if ENTITIES[et][1] not in modules_edit:
+            part = part & ~Q(category__in=SENSITIVE_CATEGORIES)
+        scope |= part
+    rows = Attachment.objects.filter(organization=org).filter(scope)
+    if kind in KINDS:
+        rows = rows.filter(kind=kind)
+    elif kind == 'photos':
+        rows = rows.exclude(kind='document')
+    if category:
+        rows = rows.filter(category=category)
+    q = (q or '').strip()
+    if q:
+        rows = rows.filter(Q(original_name__icontains=q) | Q(description__icontains=q) | Q(party__name__icontains=q) | Q(vehicle__registration__icontains=q)
+                           | Q(agreement__title__icontains=q) | Q(transaction__reference__icontains=q))
+    total = rows.count()
+    rows = rows.select_related('uploaded_by', 'party', 'vehicle', 'vehicle__detail', 'agreement', 'maintenance', 'maintenance__vehicle', 'transaction')
+    items = []
+    for a in rows.order_by('-created_at')[offset:offset + limit]:
+        d = to_dict(a, org.pk)
+        et, eid, name, detail = entity_info(a)
+        d.update(entityType=et, entityId=eid, entityName=name, entityDetail=detail)
+        items.append(d)
+    return {'items': items, 'total': total}
+
+
+def replace(org, user, att, *, filename, data):
+    """Replace a document: the new file takes the old one's record, kind, category and description; the old object is removed afterwards."""
+    et, pk = _owner_type(att), att.owner_ref[1]
+    old_id = att.pk
+    new, created = upload(org, user, et, pk, filename=filename, data=data, kind=att.kind, category=att.category, description=att.description)
+    if not created:
+        raise err('same_file', 'This is the same file that is already attached')
+    try:
+        delete(org, user, Attachment.objects.get(pk=old_id))
+    except (FinanceError, Attachment.DoesNotExist):
+        pass
+    audit(org, user, 'attachment.replace', et, pk, after={'old_attachment_id': str(old_id), 'attachment_id': str(new.id)})
+    return new

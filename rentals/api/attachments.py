@@ -100,6 +100,37 @@ for _prefix, _etype in ROUTE_ENTITY.items():
     _make_entity_routes(_prefix, _etype)
 
 
+def _modules(user, org, action):
+    return {m for m in {v[1] for v in svc.ENTITIES.values()} if _can(user, org, m, action)}
+
+
+def _can(user, org, module, action):
+    try:
+        authorize_org(user, org, module, action)
+        return True
+    except FinanceError:
+        return False
+
+
+@router.get('/orgs/{org_id}/files')
+def central_files(request, org_id: int, entity: str = '', entity_id: int = 0, category: str = '', kind: str = 'document', q: str = '',
+                  limit: int = 100, offset: int = 0):
+    """The central Documents screen: every file across drivers, owners, clients, vehicles, agreements, maintenance and accounts,
+    filtered by record type / record / category / text. Only modules the caller may view are included."""
+    org = _org(org_id)
+    return svc.central_list(org, _modules(request.user, org, 'view'), _modules(request.user, org, 'edit'), entity=entity or None, entity_id=entity_id or None,
+                            category=category, kind=kind, q=q, limit=max(1, min(limit, 200)), offset=max(0, offset))
+
+
+@router.post('/orgs/{org_id}/files/{file_id}/replace')
+def file_replace(request, org_id: int, file_id: str, file: UploadedFile = File(...)):
+    org = _org(org_id)
+    att = _attachment(org, file_id)
+    authorize_org(request.user, org, svc.module_for(att), 'edit')
+    new = svc.replace(org, request.user, att, filename=file.name, data=file.read())
+    return svc.to_dict(new, org.pk)
+
+
 @router.get('/orgs/{org_id}/files-limits')
 def file_limits(request, org_id: int):
     org = _org(org_id)

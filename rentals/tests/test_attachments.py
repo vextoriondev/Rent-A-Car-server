@@ -520,3 +520,73 @@ class MissingTableResilienceTests(Base):
         row = [d for d in self.c.get(f'/api/v1/orgs/{self.org.pk}/tasin-drivers').json() if d['id'] == str(self.driver.pk)][0]
         self.assertIn('variant=thumb', row['thumbUrl'])
         self.assertEqual(row['photoUrl'].split('?')[0], row['thumbUrl'].split('?')[0])
+
+
+class CentralDocumentsTests(Base):
+    """The Documents module: one list across drivers, owners and vehicles, filtered, linked to the record, with replace."""
+    def setUp(self):
+        super().setUp()
+        self.up([('licence.pdf', PDF + b'l', 'application/pdf')], category='license')
+        self.up([('nid.pdf', PDF + b'n', 'application/pdf')], category='nid', url=self.url('tasin-owners'))
+        self.up([('reg.pdf', PDF + b'r', 'application/pdf')], category='registration', url=self.url('tasin-vehicles'))
+        self.up([('front.jpg', jpeg(300, 200), 'image/jpeg')], kind='photo', url=self.url('tasin-vehicles'))
+        self.base = f'/api/v1/orgs/{self.org.pk}/files'
+
+    def names(self, qs='', client=None):
+        r = (client or self.c).get(self.base + qs)
+        self.assertEqual(r.status_code, 200, r.content)
+        return {i['fileName']: i for i in r.json()['items']}
+
+    def test_lists_documents_from_every_record_with_entity_names(self):
+        got = self.names()
+        self.assertEqual(set(got), {'licence.pdf', 'nid.pdf', 'reg.pdf'})        # photos are not documents
+        self.assertEqual((got['licence.pdf']['entityType'], got['licence.pdf']['entityName']), ('driver', 'Drv'))
+        self.assertEqual((got['nid.pdf']['entityType'], got['nid.pdf']['entityName']), ('owner', 'Own'))
+        self.assertEqual((got['reg.pdf']['entityType'], got['reg.pdf']['entityName']), ('vehicle', 'ATT-1'))
+
+    def test_filters(self):
+        self.assertEqual(set(self.names('?entity=driver')), {'licence.pdf'})
+        self.assertEqual(set(self.names(f'?entity=vehicle&entity_id={self.car.pk}')), {'reg.pdf'})
+        self.assertEqual(set(self.names(f'?entity=vehicle&entity_id={self.car.pk + 99}')), set())
+        self.assertEqual(set(self.names('?category=nid')), {'nid.pdf'})
+        self.assertEqual(set(self.names('?q=Own')), {'nid.pdf'})                 # search by the record's name
+        self.assertEqual(set(self.names('?q=ATT-1')), {'reg.pdf'})
+        self.assertEqual(self.c.get(self.base + '?entity=bogus').status_code, 400)
+
+    def test_view_only_role_does_not_see_identity_papers(self):
+        u = User.objects.create_user('viewer3', password='x')
+        Membership.objects.create(organization=self.org, user=u, role='viewer')
+        c = Client(); c.force_login(u)
+        self.assertEqual(set(self.names(client=c)), {'reg.pdf'})
+
+    def test_other_organization_is_refused(self):
+        u = User.objects.create_user('intruder2', password='x')
+        Membership.objects.create(organization=self.org2, user=u, role='admin', is_super_admin=True)
+        c = Client(); c.force_login(u)
+        self.assertEqual(c.get(self.base).status_code, 403)
+        self.assertEqual(Client().get(self.base).status_code, 401)
+
+    def test_replace_swaps_the_file_and_keeps_record_and_category(self):
+        old = Attachment.objects.get(original_name='licence.pdf')
+        old_key = old.storage_key
+        with self.captureOnCommitCallbacks(execute=True):
+            r = self.c.post(f'{self.base}/{old.id}/replace', {'file': SimpleUploadedFile('new.pdf', PDF + b'NEW', content_type='application/pdf')})
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertFalse(Attachment.objects.filter(pk=old.pk).exists())
+        new = Attachment.objects.get(pk=r.json()['id'])
+        self.assertEqual((new.party_id, new.category, new.kind), (self.driver.pk, 'license', 'document'))
+        from ..services.files.storage import get_storage
+        self.assertFalse(get_storage().exists(old_key))
+        self.assertTrue(AuditEvent.objects.filter(action='attachment.replace').exists())
+        # replacing with the identical file is refused and changes nothing
+        again = self.c.post(f'{self.base}/{new.id}/replace', {'file': SimpleUploadedFile('new.pdf', PDF + b'NEW', content_type='application/pdf')})
+        self.assertEqual(again.status_code, 400)
+        self.assertTrue(Attachment.objects.filter(pk=new.pk).exists())
+
+    def test_replace_needs_edit_permission(self):
+        u = User.objects.create_user('viewer4', password='x')
+        Membership.objects.create(organization=self.org, user=u, role='viewer')
+        c = Client(); c.force_login(u)
+        reg = Attachment.objects.get(original_name='reg.pdf')
+        r = c.post(f'{self.base}/{reg.id}/replace', {'file': SimpleUploadedFile('x.pdf', PDF + b'x', content_type='application/pdf')})
+        self.assertEqual(r.status_code, 403)
