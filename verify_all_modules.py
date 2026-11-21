@@ -67,16 +67,17 @@ def run_audit():
     sa_perms = ROLE_PERMISSIONS['super_admin']
     assert len(sa_perms) >= 20, "Super admin permission set too small"
 
-    # Assert Staff cannot access accounts or manage invoices
+    # Assert Staff cannot access financial accounts or approve due collections
     staff_perms = ROLE_PERMISSIONS['staff']
-    assert 'accounts:manage' not in staff_perms, "Staff should not have accounts:manage"
-    assert 'invoices:manage' not in staff_perms, "Staff should not have invoices:manage"
+    assert 'accounts:create' not in staff_perms and 'accounts:approve' not in staff_perms, "Staff should not have accounts permissions"
+    assert 'due_collection:approve' not in staff_perms, "Staff should not have due_collection:approve"
     assert 'duties:view' in staff_perms, "Staff should have duties:view"
 
     # Assert Accountant has financial access but not driver management
     acc_perms = ROLE_PERMISSIONS['accountant']
-    assert 'invoices:manage' in acc_perms and 'accounts:manage' in acc_perms
-    assert 'drivers:manage' not in acc_perms
+    assert 'accounts:create' in acc_perms and 'accounts:approve' in acc_perms
+    assert 'due_collection:approve' in acc_perms
+    assert 'drivers:create' not in acc_perms and 'drivers:delete' not in acc_perms
 
     print("   ✓ All 5 roles conform to security matrix and least-privilege principles.")
     passed_tests += 1
